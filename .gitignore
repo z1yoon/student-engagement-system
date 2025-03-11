@@ -35,3 +35,4 @@ docker-compose.dev.yml
 .DS_Store
 *.sw?
 
+.env
