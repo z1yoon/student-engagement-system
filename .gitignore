@@ -1,0 +1,36 @@
+# Backend
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
+backend/venv/
+backend/.env
+backend/*.env
+backend/logs/
+backend/*.log
+backend/db.sqlite3
+backend/.pytest_cache/
+
+# Frontend
+frontend/node_modules/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/dist/
+frontend/build/
+frontend/coverage/
+frontend/.cache/
+
+# Docker & Deployment
+*.dockerignore
+docker-compose.override.yml
+docker-compose.dev.yml
+.docker/
+.k8s/
+
+# IDE & System
+.vscode/
+.idea/
+.DS_Store
+*.sw?
+
