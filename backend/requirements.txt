@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pyodbc
+azure-storage-blob
+azure-ai-vision-imageanalysis
+azure-ai-vision-face
+azure-iot-device
+#msrest
+requests
+python-dotenv
+opencv-python-headless
+numpy
+scipy
