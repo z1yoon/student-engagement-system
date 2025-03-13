@@ -101,8 +101,8 @@ function AnalyzeReport() {
       <h3>📊 Engagement Chart</h3>
       {chartData ? <Bar data={chartData} options={{ responsive: true }} /> : <p>Loading chart...</p>}
 
-      {/* Engagement Details */}
-      <h3>📜 Engagement Details</h3>
+      {/* Engagement & Attendance Details */}
+      <h3>📜 Student Details</h3>
       <ul style={{ listStyle: "none", padding: 0 }}>
         {currentStudents.map(([name, details], index) => (
           <li
@@ -126,10 +126,22 @@ function AnalyzeReport() {
             ) : (
               <div style={{ width: 50, height: 50, backgroundColor: "#ccc", borderRadius: "50%" }} />
             )}
-            <strong>{name}</strong>:
-            <span>
-              ✅ Focused: {details.focused}, ❌ Distracted: {details.distracted}, 📱 Phone Usage: {details.phone_usage}, 💤 Sleeping: {details.sleeping}
-            </span>
+            <div style={{ flex: 1 }}>
+              <strong>{name}</strong>
+              <div>
+                <span>
+                  ✅ Focused: {details.focused}, ❌ Distracted: {details.distracted}, 📱 Phone Usage: {details.phone_usage}, 💤 Sleeping: {details.sleeping}
+                </span>
+              </div>
+              <div>
+                {/* Attendance Indicator */}
+                {details.attended ? (
+                  <span style={{ color: "green", fontWeight: "bold" }}>✔ Attended</span>
+                ) : (
+                  <span style={{ color: "red", fontWeight: "bold" }}>✘ Absent</span>
+                )}
+              </div>
+            </div>
           </li>
         ))}
       </ul>

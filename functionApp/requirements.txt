@@ -1,0 +1,6 @@
+azure-functions
+azure-core
+azure-ai-vision
+azure-ai-vision-face
+pyodbc
+

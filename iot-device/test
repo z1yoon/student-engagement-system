@@ -1,0 +1,27 @@
+import time
+from azure.iot.device import IoTHubDeviceClient
+import os
+
+# Replace this with your actual device connection string
+DEVICE_CONNECTION_STRING = os.getenv("DEVICE_CONNECTION_STRING", "")
+
+def test_iot_hub_connection():
+    try:
+        print("Connecting to Azure IoT Hub...")
+        client = IoTHubDeviceClient.create_from_connection_string(DEVICE_CONNECTION_STRING)
+        client.connect()
+        print("Connection successful. Monitoring connection status...")
+
+        while True:
+            print("Still connected...")
+            time.sleep(10)  # Sleep for 10 seconds to keep the connection alive
+
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        client.disconnect()
+        print("Disconnected from IoT Hub.")
+
+if __name__ == "__main__":
+    test_iot_hub_connection()
+

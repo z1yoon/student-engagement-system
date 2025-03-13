@@ -1,0 +1,13 @@
+import os
+import pyodbc
+
+DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
+
+try:
+    conn = pyodbc.connect(DB_CONNECTION_STRING)
+    cursor = conn.cursor()
+    cursor.execute("SELECT @@VERSION")
+    row = cursor.fetchone()
+    print(f"Connected to Azure SQL Server: {row[0]}")
+except Exception as e:
+    print(f"Error connecting to Azure SQL Database: {e}")
