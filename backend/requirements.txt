@@ -3,12 +3,14 @@ uvicorn
 pyodbc
 azure-storage-blob
 azure-ai-vision-imageanalysis
-azure-ai-vision-face
 azure-iot-device
 azure-iot-hub
-#msrest
 requests
 python-dotenv
 opencv-python-headless
 numpy
 scipy
+pydantic
+pillow
+insightface
+onnxruntime

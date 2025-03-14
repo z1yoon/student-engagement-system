@@ -18,18 +18,28 @@ def get_db_connection():
 
 def get_enrolled_students():
     """
-    Returns a list of { "name": student_name, "face_id": face_id, "image_url": ... }
-    for all students who have a face_id stored.
+    Retrieves all enrolled students (with a stored face_embedding) from the Students table.
+    Returns a list of dictionaries containing student_name, face_id, face_embedding, and image_url.
     """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT student_name, face_id, image_url FROM Students WHERE face_id IS NOT NULL")
+        cursor.execute("SELECT student_name, face_id, face_embedding, image_url FROM Students WHERE face_embedding IS NOT NULL")
         rows = cursor.fetchall()
-        return [
-            {"name": row[0], "face_id": row[1], "image_url": row[2]}
-            for row in rows
-        ]
+        result = []
+        for row in rows:
+            name = row[0]
+            face_id = row[1]
+            face_embedding_json = row[2]
+            image_url = row[3]
+            face_embedding = json.loads(face_embedding_json) if face_embedding_json else None
+            result.append({
+                "name": name,
+                "face_id": face_id,
+                "face_embedding": face_embedding,
+                "image_url": image_url
+            })
+        return result
     except pyodbc.Error as e:
         logger.error(f"❌ Error fetching enrolled students: {e}")
         return []
@@ -38,7 +48,10 @@ def get_enrolled_students():
 
 def mark_attendance(student_name, is_attended, image_data):
     """
-    Inserts an attendance record for recognized student.
+    Inserts an attendance record for a recognized student.
+    :param student_name: Name of the student.
+    :param is_attended: Boolean indicating whether the student is marked present.
+    :param image_data: The Base64 image string for reference.
     """
     conn = get_db_connection()
     try:
@@ -60,7 +73,11 @@ def mark_attendance(student_name, is_attended, image_data):
 
 def add_engagement_record(student_name, phone_detected, gaze, sleeping):
     """
-    Inserts an engagement record into DB.
+    Inserts an engagement record for a student.
+    :param student_name: Name of the student.
+    :param phone_detected: Boolean indicating if a phone was detected.
+    :param gaze: String indicating whether the student is focused or distracted.
+    :param sleeping: Boolean indicating if the student appears to be sleeping.
     """
     conn = get_db_connection()
     try:
@@ -75,4 +92,3 @@ def add_engagement_record(student_name, phone_detected, gaze, sleeping):
         logger.error(f"❌ Error adding engagement record: {e}")
     finally:
         conn.close()
-

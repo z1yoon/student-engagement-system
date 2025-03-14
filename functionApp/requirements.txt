@@ -1,6 +1,10 @@
 azure-functions
 azure-core
-azure-ai-vision
-azure-ai-vision-face
+azure-ai-vision-imageanalysis
 pyodbc
-
+Pillow
+numpy
+scipy
+requests
+insightface
+onnxruntime

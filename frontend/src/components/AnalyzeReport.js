@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import Chart from 'chart.js/auto';
+import "chart.js/auto";
 import { Bar } from "react-chartjs-2";
 import axios from "axios";
 
@@ -16,7 +16,7 @@ function AnalyzeReport() {
 
   useEffect(() => {
     fetchAnalyzeReport();
-    const interval = setInterval(fetchAnalyzeReport, 5000);
+    const interval = setInterval(fetchAnalyzeReport, 60000);
     return () => clearInterval(interval);
   }, [startDate, endDate]);
 

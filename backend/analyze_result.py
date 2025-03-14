@@ -21,19 +21,17 @@ def get_analyze_results(start_date=None, end_date=None):
                 "attended": False,
                 "image_url": None
             }
-        # Gaze
+        # Update counts based on gaze and sleeping status
         if record["gaze"] == "focused":
             summary[name]["focused"] += 1
         else:
             summary[name]["distracted"] += 1
-        # Phone usage
         if record["phone_detected"]:
             summary[name]["phone_usage"] += 1
-        # Sleeping
         if record["sleeping"]:
             summary[name]["sleeping"] += 1
 
-    # Merge attendance
+    # Merge attendance information
     for record in attendance_records:
         name = record["recognized_name"]
         if name not in summary:

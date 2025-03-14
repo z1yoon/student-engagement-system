@@ -1,10 +1,14 @@
 {
   "bindings": [
     {
-      "type": "eventGridTrigger",
+      "name": "event",
+      "type": "eventHubTrigger",
       "direction": "in",
-      "name": "event"
+      "eventHubName": "iothub-ehub-nus-iot-hu-57079366-67ebf142e8",
+      "connection": "IOT_HUB_CONNECTION_STRING",
+      "cardinality": "one",
+      "consumerGroup": "$Default"
     }
-  ]
+  ],
+  "disabled": false
 }
-

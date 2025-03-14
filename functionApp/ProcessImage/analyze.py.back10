@@ -3,15 +3,18 @@ import io
 import base64
 import json
 import logging
+import threading
 import numpy as np
 from PIL import Image
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.vision.imageanalysis import ImageAnalysisClient
+from azure.storage.blob import BlobServiceClient
 import insightface
 from functools import lru_cache
 
 # Import DB methods (adjust relative import based on your folder structure)
-from .db import add_engagement_record, mark_attendance, get_enrolled_students
+#from .db import add_engagement_record, mark_attendance, get_enrolled_students
+from db import add_engagement_record, mark_attendance, get_enrolled_students
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,44 +22,55 @@ logger = logging.getLogger(__name__)
 # Environment variables
 VISION_API_ENDPOINT = os.getenv("VISION_API_ENDPOINT", "")
 VISION_API_KEY = os.getenv("VISION_API_KEY", "")
+BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING", "")
+MODELS_CONTAINER = os.getenv("MODELS_CONTAINER", "models")
 
 if not VISION_API_ENDPOINT or not VISION_API_KEY:
     raise ValueError("Azure Vision API credentials are missing!")
-
+if not BLOB_CONNECTION_STRING:
+    raise ValueError("Azure Storage connection string is missing!")
 
 # Initialize Azure Vision client
 vision_client = ImageAnalysisClient(VISION_API_ENDPOINT, AzureKeyCredential(VISION_API_KEY))
 
-# Use a writable directory instead of `/root/`
-MODEL_DIR = "/tmp/insightface/models/buffalo_l"
 
-def download_models():
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    logger.info("📥 Checking and downloading InsightFace models...")
+def download_models_if_needed(model_dir="/tmp/models"):
+    """
+    Downloads model files from Blob Storage to /tmp/models if the directory is empty.
+    """
+    if not os.path.exists(model_dir) or not os.listdir(model_dir):
+        logger.info("Model directory empty. Downloading models from Blob Storage...")
+        os.makedirs(model_dir, exist_ok=True)
+        blob_service_client = BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING)
+        container_client = blob_service_client.get_container_client(MODELS_CONTAINER)
+        for blob in container_client.list_blobs():
+            blob_client = container_client.get_blob_client(blob.name)
+            file_path = os.path.join(model_dir, blob.name)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, "wb") as file:
+                file.write(blob_client.download_blob().readall())
+            logger.info(f"Downloaded {blob.name} to {file_path}")
+        logger.info("All models downloaded successfully.")
+    else:
+        logger.info("Model directory already populated.")
 
-    try:
-        face_app = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR, download=True)
-        face_app.prepare(ctx_id=-1, det_size=(640, 640))
-        logger.info("✅ Models downloaded and ready.")
-
-        # Log the contents of the model directory
-        model_files = os.listdir(MODEL_DIR)
-        logger.info(f"Model directory contents: {model_files}")
-    except Exception as e:
-        logger.error(f"❌ Error downloading models: {e}")
-        raise
 
 @lru_cache(maxsize=1)
 def get_face_app():
-    """
-    Ensures models exist before initializing InsightFace.
-    """
-    if not os.path.exists(MODEL_DIR) or not os.listdir(MODEL_DIR):
-        logger.warning("⚠️ Models missing, triggering download...")
-        download_models()
+    MODEL_DIR = "/tmp/models/buffalo_l"
+    download_models_if_needed(MODEL_DIR)  # Ensure models are downloaded
+
+    # Debug: Check that the directory exists and list its contents
+    if os.path.exists(MODEL_DIR):
+        logger.info(f"✅ Model directory exists: {MODEL_DIR}")
+        logger.info(f"📂 Files in model directory: {os.listdir(MODEL_DIR)}")
+    else:
+        logger.error(f"❌ Model directory {MODEL_DIR} does not exist!")
+        raise FileNotFoundError(f"❌ Model directory {MODEL_DIR} does not exist!")
 
     try:
-        face_app = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR, download=False)
+        # ✅ Use "buffalo_l" instead of None
+        face_app = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR)
         face_app.prepare(ctx_id=-1, det_size=(640, 640))
         logger.info("✅ FaceAnalysis initialized successfully.")
         return face_app
@@ -64,11 +78,9 @@ def get_face_app():
         logger.error(f"❌ Error initializing FaceAnalysis: {e}")
         raise
 
-# 🚀 Trigger model download after Azure Function starts
-download_models()
 
-# Instantiate face_app after models are ensured
-face_app = get_face_app()
+# Load the face app once (cached)
+face_app = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR)
 
 
 def compute_head_pose(landmarks):

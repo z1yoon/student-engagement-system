@@ -2,30 +2,28 @@ import logging
 import json
 import azure.functions as func
 
-# Import the analyze logic and database code from the same folder
+# Import the analysis module (analyze.py)
 from . import analyze
 
-def main(event: func.EventGridEvent):
-    logging.info("🔔 Event Grid trigger received an event.")
+def main(event: func.EventHubEvent):
+    """
+    This function is triggered by IoT Hub messages.
+    It expects a JSON payload that contains "image_data" as a Base64‑encoded image.
+    """
+    # Decode the event message (bytes to string)
+    try:
+        message_body = event.get_body().decode('utf-8')
+        payload = json.loads(message_body)
+    except Exception as e:
+        logging.error(f"❌ Failed to decode and parse IoT message: {e}")
+        return
 
-    # Extract the event data as a Python dict
-    event_data = event.get_json()  # The JSON payload from IoT Hub
-
-    # You must ensure your IoT device message includes "image_data" in the payload
-    image_data = event_data.get("image_data")
+    # Get the image_data field
+    image_data = payload.get("image_data")
     if not image_data:
-        logging.error("No 'image_data' found in event payload.")
-        return func.HttpResponse(
-            "No 'image_data' found in event payload.",
-            status_code=400
-        )
+        logging.error(f"❌ 'image_data' missing in payload: {payload}")
+        return
 
-    # Analyze the image
+    # Analyze the image using our analysis logic
     result = analyze.analyze_image(image_data)
-
-    # Return the analysis result
-    return func.HttpResponse(
-        json.dumps(result),
-        status_code=200,
-        mimetype="application/json"
-    )
+    logging.info(f"✅ Analysis result: {json.dumps(result)}")

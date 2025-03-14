@@ -1,7 +1,7 @@
 import os
-import pyodbc
 import json
 import logging
+import pyodbc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ def get_db_connection():
 def create_tables():
     """
     Creates or alters tables: Students, AttendanceRecords, EngagementRecords, SystemSettings.
+    The Students table now stores face_embedding as JSON.
     """
     conn = get_db_connection()
     if not conn:
@@ -26,17 +27,53 @@ def create_tables():
     try:
         cursor = conn.cursor()
 
-        # Students
-        cursor.execute("IF OBJECT_ID('Students', 'U') IS NULL BEGIN CREATE TABLE Students (id INT IDENTITY(1,1) PRIMARY KEY, student_name VARCHAR(100) NOT NULL UNIQUE, face_id VARCHAR(255) NULL, face_encoding TEXT NULL, image_url VARCHAR(255) NULL) END")
+        # Students table (stores face_embedding as JSON)
+        cursor.execute(
+            "IF OBJECT_ID('Students', 'U') IS NULL BEGIN "
+            "CREATE TABLE Students ("
+            "id INT IDENTITY(1,1) PRIMARY KEY, "
+            "student_name VARCHAR(100) NOT NULL UNIQUE, "
+            "face_id VARCHAR(255) NULL, "
+            "face_embedding TEXT NULL, "
+            "image_url VARCHAR(255) NULL) "
+            "END"
+        )
 
-        # AttendanceRecords
-        cursor.execute("IF OBJECT_ID('AttendanceRecords', 'U') IS NULL BEGIN CREATE TABLE AttendanceRecords (id INT IDENTITY(1,1) PRIMARY KEY, timestamp DATETIME DEFAULT GETUTCDATE(), student_id INT NULL, recognized_name VARCHAR(100) NOT NULL, image_url TEXT NULL, is_attended BIT NOT NULL) END")
+        # AttendanceRecords table
+        cursor.execute(
+            "IF OBJECT_ID('AttendanceRecords', 'U') IS NULL BEGIN "
+            "CREATE TABLE AttendanceRecords ("
+            "id INT IDENTITY(1,1) PRIMARY KEY, "
+            "timestamp DATETIME DEFAULT GETUTCDATE(), "
+            "student_id INT NULL, "
+            "recognized_name VARCHAR(100) NOT NULL, "
+            "image_url TEXT NULL, "
+            "is_attended BIT NOT NULL) "
+            "END"
+        )
 
-        # EngagementRecords
-        cursor.execute("IF OBJECT_ID('EngagementRecords', 'U') IS NULL BEGIN CREATE TABLE EngagementRecords (id INT IDENTITY(1,1) PRIMARY KEY, timestamp DATETIME DEFAULT GETUTCDATE(), student_name VARCHAR(100) NOT NULL, phone_detected BIT NOT NULL, gaze VARCHAR(50) NOT NULL, sleeping BIT NOT NULL) END")
+        # EngagementRecords table
+        cursor.execute(
+            "IF OBJECT_ID('EngagementRecords', 'U') IS NULL BEGIN "
+            "CREATE TABLE EngagementRecords ("
+            "id INT IDENTITY(1,1) PRIMARY KEY, "
+            "timestamp DATETIME DEFAULT GETUTCDATE(), "
+            "student_name VARCHAR(100) NOT NULL, "
+            "phone_detected BIT NOT NULL, "
+            "gaze VARCHAR(50) NOT NULL, "
+            "sleeping BIT NOT NULL) "
+            "END"
+        )
 
-        # SystemSettings
-        cursor.execute("IF OBJECT_ID('SystemSettings', 'U') IS NULL BEGIN CREATE TABLE SystemSettings (id INT PRIMARY KEY, capture_active BIT NOT NULL DEFAULT 0) INSERT INTO SystemSettings (id, capture_active) VALUES (1, 0) END")
+        # SystemSettings table
+        cursor.execute(
+            "IF OBJECT_ID('SystemSettings', 'U') IS NULL BEGIN "
+            "CREATE TABLE SystemSettings ("
+            "id INT PRIMARY KEY, "
+            "capture_active BIT NOT NULL DEFAULT 0) "
+            "INSERT INTO SystemSettings (id, capture_active) VALUES (1, 0) "
+            "END"
+        )
 
         conn.commit()
         logger.info("✅ Tables created or already exist.")
@@ -45,14 +82,18 @@ def create_tables():
     finally:
         conn.close()
 
-def add_student(name, face_id=None, face_encoding=None, image_url=None):
+def add_student(name, face_id=None, face_embedding=None, image_url=None):
+    """
+    Inserts a new student record into the Students table.
+    The face_embedding is stored as JSON (if available).
+    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        face_enc_json = json.dumps(face_encoding) if face_encoding else None
+        face_emb_json = json.dumps(face_embedding) if face_embedding else None
         cursor.execute(
-            "INSERT INTO Students (student_name, face_id, face_encoding, image_url) VALUES (?, ?, ?, ?)",
-            (name, face_id, face_enc_json, image_url)
+            "INSERT INTO Students (student_name, face_id, face_embedding, image_url) VALUES (?, ?, ?, ?)",
+            (name, face_id, face_emb_json, image_url)
         )
         conn.commit()
         logger.info(f"✅ Student {name} added.")
@@ -62,6 +103,9 @@ def add_student(name, face_id=None, face_encoding=None, image_url=None):
         conn.close()
 
 def update_capture_status(active: bool):
+    """
+    Updates the SystemSettings table to indicate whether image capture is active.
+    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -73,6 +117,9 @@ def update_capture_status(active: bool):
         conn.close()
 
 def get_engagement_records(start_date=None, end_date=None):
+    """
+    Retrieves engagement records (phone usage, gaze, and sleeping).
+    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -106,6 +153,9 @@ def get_engagement_records(start_date=None, end_date=None):
         conn.close()
 
 def get_attendance_records(start_date=None, end_date=None):
+    """
+    Retrieves attendance records.
+    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
