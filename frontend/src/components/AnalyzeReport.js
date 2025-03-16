@@ -2,8 +2,26 @@ import React, { useState, useEffect } from "react";
 import "chart.js/auto";
 import { Bar } from "react-chartjs-2";
 import axios from "axios";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faEye } from "@fortawesome/free-solid-svg-icons";
+import Modal from "react-modal"; // Import a modal library
 
 const API_BASE_URL = "http://localhost:8000";
+
+// Modal styles (customize as needed)
+const customStyles = {
+  content: {
+    top: "50%",
+    left: "50%",
+    right: "auto",
+    bottom: "auto",
+    marginRight: "-50%",
+    transform: "translate(-50%, -50%)",
+    maxWidth: "90%",
+    maxHeight: "90%",
+    overflow: "auto",
+  },
+};
 
 function AnalyzeReport() {
   const [reportData, setReportData] = useState({});
@@ -12,6 +30,8 @@ function AnalyzeReport() {
   const [currentPage, setCurrentPage] = useState(1);
   const [startDate, setStartDate] = useState(""); // Date Range Start
   const [endDate, setEndDate] = useState(""); // Date Range End
+  const [modalIsOpen, setModalIsOpen] = useState(false); // Modal state
+  const [selectedImage, setSelectedImage] = useState(""); // Selected image URL
   const studentsPerPage = 5;
 
   useEffect(() => {
@@ -50,6 +70,17 @@ function AnalyzeReport() {
         { label: "Sleeping", data: sleepingCounts, backgroundColor: "purple" },
       ],
     });
+  };
+
+  // Open modal with the selected image
+  const openModal = (imageUrl) => {
+    setSelectedImage(imageUrl);
+    setModalIsOpen(true);
+  };
+
+  // Close modal
+  const closeModal = () => {
+    setModalIsOpen(false);
   };
 
   // Filter students based on search input
@@ -115,14 +146,14 @@ function AnalyzeReport() {
               borderBottom: "1px solid #ddd",
             }}
           >
+            {/* Replace image with an icon */}
             {details.image_url ? (
-              <img
-                src={details.image_url}
-                alt={name}
-                width={50}
-                height={50}
-                style={{ borderRadius: "50%", objectFit: "cover" }}
-              />
+              <div
+                style={{ cursor: "pointer" }}
+                onClick={() => openModal(details.image_url)}
+              >
+                <FontAwesomeIcon icon={faEye} size="2x" />
+              </div>
             ) : (
               <div style={{ width: 50, height: 50, backgroundColor: "#ccc", borderRadius: "50%" }} />
             )}
@@ -180,6 +211,36 @@ function AnalyzeReport() {
           Next ▶
         </button>
       </div>
+
+      {/* Modal for displaying the image */}
+      <Modal
+        isOpen={modalIsOpen}
+        onRequestClose={closeModal}
+        style={customStyles}
+        contentLabel="Enrolled Student Image"
+      >
+        <div style={{ textAlign: "center" }}>
+          <img
+            src={selectedImage}
+            alt="Enrolled Student"
+            style={{ maxWidth: "100%", maxHeight: "80vh" }}
+          />
+          <button
+            onClick={closeModal}
+            style={{
+              marginTop: "10px",
+              padding: "5px 10px",
+              cursor: "pointer",
+              border: "1px solid #ddd",
+              borderRadius: "5px",
+              background: "#007BFF",
+              color: "white",
+            }}
+          >
+            Close
+          </button>
+        </div>
+      </Modal>
     </div>
   );
 }
