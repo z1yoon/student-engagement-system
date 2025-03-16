@@ -17,17 +17,12 @@ def get_db_connection():
         raise
 
 def create_tables():
-    """
-    Creates or alters tables: Students, AttendanceRecords, EngagementRecords, SystemSettings.
-    The Students table now stores face_embedding as JSON.
-    """
     conn = get_db_connection()
     if not conn:
         return
     try:
         cursor = conn.cursor()
 
-        # Students table (stores face_embedding as JSON)
         cursor.execute(
             "IF OBJECT_ID('Students', 'U') IS NULL BEGIN "
             "CREATE TABLE Students ("
@@ -39,7 +34,6 @@ def create_tables():
             "END"
         )
 
-        # AttendanceRecords table
         cursor.execute(
             "IF OBJECT_ID('AttendanceRecords', 'U') IS NULL BEGIN "
             "CREATE TABLE AttendanceRecords ("
@@ -52,7 +46,6 @@ def create_tables():
             "END"
         )
 
-        # EngagementRecords table
         cursor.execute(
             "IF OBJECT_ID('EngagementRecords', 'U') IS NULL BEGIN "
             "CREATE TABLE EngagementRecords ("
@@ -65,7 +58,6 @@ def create_tables():
             "END"
         )
 
-        # SystemSettings table
         cursor.execute(
             "IF OBJECT_ID('SystemSettings', 'U') IS NULL BEGIN "
             "CREATE TABLE SystemSettings ("
@@ -82,11 +74,33 @@ def create_tables():
     finally:
         conn.close()
 
+def get_enrolled_students():
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT student_name, face_id, face_embedding, image_url FROM Students WHERE face_embedding IS NOT NULL")
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            name = row[0]
+            face_id = row[1]
+            face_embedding_json = row[2]
+            image_url = row[3]
+            face_embedding = json.loads(face_embedding_json) if face_embedding_json else None
+            result.append({
+                "name": name,
+                "face_id": face_id,
+                "face_embedding": face_embedding,
+                "image_url": image_url
+            })
+        return result
+    except pyodbc.Error as e:
+        logger.error(f"❌ Error fetching enrolled students: {e}")
+        return []
+    finally:
+        conn.close()
+
 def add_student(name, face_id=None, face_embedding=None, image_url=None):
-    """
-    Inserts a new student record into the Students table.
-    The face_embedding is stored as JSON (if available).
-    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -102,24 +116,41 @@ def add_student(name, face_id=None, face_embedding=None, image_url=None):
     finally:
         conn.close()
 
-def update_capture_status(active: bool):
-    """
-    Updates the SystemSettings table to indicate whether image capture is active.
-    """
+def mark_attendance(student_name, is_attended, image_data):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE SystemSettings SET capture_active=? WHERE id=1", (1 if active else 0,))
+        cursor.execute("SELECT id FROM Students WHERE student_name = ?", (student_name,))
+        row = cursor.fetchone()
+        student_id = row[0] if row else None
+
+        cursor.execute("""
+            INSERT INTO AttendanceRecords (student_id, recognized_name, image_url, is_attended)
+            VALUES (?, ?, ?, ?)
+        """, (student_id, student_name, image_data, 1 if is_attended else 0))
         conn.commit()
+        logger.info(f"✅ Attendance recorded for {student_name}.")
     except pyodbc.Error as e:
-        logger.error(f"❌ Error updating capture status: {e}")
+        logger.error(f"❌ Error inserting attendance record: {e}")
+    finally:
+        conn.close()
+
+def add_engagement_record(student_name, phone_detected, gaze, sleeping):
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO EngagementRecords (student_name, phone_detected, gaze, sleeping)
+            VALUES (?, ?, ?, ?)
+        """, (student_name, 1 if phone_detected else 0, gaze, 1 if sleeping else 0))
+        conn.commit()
+        logger.info(f"✅ Engagement record added for {student_name}.")
+    except pyodbc.Error as e:
+        logger.error(f"❌ Error adding engagement record: {e}")
     finally:
         conn.close()
 
 def get_engagement_records(start_date=None, end_date=None):
-    """
-    Retrieves engagement records (phone usage, gaze, and sleeping).
-    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -153,9 +184,6 @@ def get_engagement_records(start_date=None, end_date=None):
         conn.close()
 
 def get_attendance_records(start_date=None, end_date=None):
-    """
-    Retrieves attendance records.
-    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -184,5 +212,82 @@ def get_attendance_records(start_date=None, end_date=None):
     except pyodbc.Error as e:
         logger.error(f"❌ Error fetching attendance records: {e}")
         return []
+    finally:
+        conn.close()
+
+def update_capture_status(active: bool):
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE SystemSettings SET capture_active=? WHERE id=1", (1 if active else 0,))
+        conn.commit()
+    except pyodbc.Error as e:
+        logger.error(f"❌ Error updating capture status: {e}")
+    finally:
+        conn.close()
+
+def get_analyze_results(start_date=None, end_date=None):
+    engagement_records = get_engagement_records(start_date, end_date)
+    attendance_records = get_attendance_records(start_date, end_date)
+
+    if not engagement_records:
+        logger.warning("⚠️ No engagement records found!")
+    if not attendance_records:
+        logger.warning("⚠️ No attendance records found!")
+
+    summary = {}
+
+    for record in engagement_records:
+        name = record["student_name"]
+        if name not in summary:
+            summary[name] = {
+                "focused": 0,
+                "distracted": 0,
+                "phone_usage": 0,
+                "sleeping": 0,
+                "attended": False,
+                "image_url": None
+            }
+        if record["gaze"] == "focused":
+            summary[name]["focused"] += 1
+        else:
+            summary[name]["distracted"] += 1
+        if record["phone_detected"]:
+            summary[name]["phone_usage"] += 1
+        if record["sleeping"]:
+            summary[name]["sleeping"] += 1
+
+    for record in attendance_records:
+        name = record["recognized_name"]
+        if name not in summary:
+            summary[name] = {
+                "focused": 0,
+                "distracted": 0,
+                "phone_usage": 0,
+                "sleeping": 0,
+                "attended": False,
+                "image_url": None
+            }
+        summary[name]["attended"] = record["is_attended"]
+        summary[name]["image_url"] = record["image_url"]
+
+    if not summary:
+        return {"message": "No engagement or attendance data found."}
+
+    return summary
+
+def get_capture_status():
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT capture_active FROM SystemSettings WHERE id = 1")
+        row = cursor.fetchone()
+        if row:
+            return {"capture_active": bool(row[0])}
+        else:
+            return {"capture_active": False}
+    except pyodbc.Error as e:
+        logger.error(f"❌ Error fetching capture status: {e}")
+        return {"capture_active": False}
     finally:
         conn.close()

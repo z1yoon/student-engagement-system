@@ -12,5 +12,5 @@ numpy
 scipy
 pydantic
 pillow
-insightface
 onnxruntime
+insightface

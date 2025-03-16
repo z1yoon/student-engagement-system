@@ -1,7 +1,6 @@
 import os
 import base64
 import io
-import json
 import logging
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Body
@@ -9,25 +8,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from azure.iot.hub import IoTHubRegistryManager
 from azure.iot.hub.models import CloudToDeviceMethod
 from PIL import Image
+import numpy as np
+import uvicorn
 
-# Initialize insightface for enrollment
-import insightface
-face_app = insightface.app.FaceAnalysis()
-face_app.prepare(ctx_id=-1, det_size=(640, 640))
-
-from db import create_tables, update_capture_status, add_student
+# Import your helper modules
+from db import (
+    create_tables,
+    add_student,
+    update_capture_status,
+    get_analyze_results,
+    get_capture_status
+)
 from utils import upload_to_blob
-from analyze_result import get_analyze_results
+from analyze import analyze_image, get_face_app, prepare_image_for_face_detection
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
-
-# Enable CORS for demonstration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Adjust for production as needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,46 +51,53 @@ def invoke_direct_method(method_name, payload=None):
         logger.error(f"❌ Failed to invoke {method_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Global variable to store the latest annotated image (updated by analyze_image)
+latest_annotated_image = None
+
 @app.post("/api/enroll-student/")
 def enroll_student(payload: dict = Body(...)):
     """
-    Enrolls a new student by storing their name and uploading their image to blob storage.
-    Computes a face embedding for the student's image for later recognition using insightface.
+    Enrolls a new student by storing their name and uploading their image.
+    Computes a face embedding for later recognition using InsightFace.
     """
     student_name = payload.get("student_name")
     image_data = payload.get("image_data")
-
     if not student_name or not image_data:
         raise HTTPException(status_code=400, detail="Missing student name or image data.")
-
-    # Decode base64 image data
     try:
-        image_bytes = base64.b64decode(image_data.split(",")[1]) if "," in image_data else base64.b64decode(image_data)
+        image_bytes = base64.b64decode(
+            image_data.split(",")[1] if "," in image_data else image_data
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid base64 data: {e}")
-
-    # Use insightface to compute the face embedding
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        image_np = np.array(image)
-        faces = face_app.get(image_np)
+        # Use the unified image processing function for enrollment
+        processed_image, image_np, _, _ = prepare_image_for_face_detection(image_bytes, 320)
+        faces = get_face_app().get(image_np)
         if faces:
-            # Use the first detected face's embedding
-            face_embedding = faces[0].embedding.tolist()
-            logger.info("✅ Face embedding computed for enrollment.")
+            embedding = getattr(faces[0], "embedding", None)
+            if embedding is not None:
+                try:
+                    embedding = np.array(embedding)
+                    face_embedding = embedding.tolist()
+                except Exception as ee:
+                    logger.error(f"Error converting embedding to numpy array: {ee}")
+                    face_embedding = None
+            else:
+                face_embedding = None
+            if face_embedding is not None:
+                logger.info("✅ Face embedding computed for enrollment.")
+            else:
+                logger.warning("⚠️ No valid face embedding computed during enrollment.")
         else:
             face_embedding = None
             logger.warning("⚠️ No face detected during enrollment.")
     except Exception as e:
         logger.error(f"Error computing face embedding: {e}")
         face_embedding = None
-
-    # Upload image to blob storage
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"{student_name}_{timestamp}.jpg"
     blob_url = upload_to_blob(image_bytes, file_name)
-
-    # Add student to DB (store face_embedding as JSON if available)
     add_student(student_name, None, face_embedding, blob_url)
     return {"message": "Student enrolled successfully!", "blob_url": blob_url}
 
@@ -114,10 +122,41 @@ def stop_capture():
 @app.get("/api/analyze_results")
 def get_analyze(start_date: str = None, end_date: str = None):
     """
-    Returns the summary of engagement & attendance.
+    Returns a summary of engagement and attendance data.
+    Also includes the latest annotated image from the analysis.
     """
-    return get_analyze_results(start_date, end_date)
+    summary = get_analyze_results(start_date, end_date)
+    if latest_annotated_image:
+        summary["latest_annotated_image"] = latest_annotated_image
+    return summary
+
+@app.post("/api/analyze_image")
+def analyze_endpoint(payload: dict = Body(...)):
+    """
+    Endpoint to analyze an image (provided as a Base64 string).
+    Delegates the analysis to the analyze module.
+    This endpoint is triggered by your Azure Function every minute.
+    """
+    global latest_annotated_image
+    image_data = payload.get("image_data")
+    if not image_data:
+        raise HTTPException(status_code=400, detail="Missing image data.")
+    try:
+        result = analyze_image(image_data)
+        if result.get("annotated_image"):
+            latest_annotated_image = result["annotated_image"]
+        return result
+    except Exception as e:
+        logger.error(f"Error during image analysis: {e}")
+        return {"error": "Failed to analyze image", "face_detected": False}
+
+@app.get("/api/capture-status")
+def capture_status():
+    """
+    Returns the current capture status from the SystemSettings table.
+    """
+    status = get_capture_status()
+    return status
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

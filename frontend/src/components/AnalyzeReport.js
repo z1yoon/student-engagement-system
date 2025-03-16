@@ -16,7 +16,7 @@ function AnalyzeReport() {
 
   useEffect(() => {
     fetchAnalyzeReport();
-    const interval = setInterval(fetchAnalyzeReport, 60000);
+    const interval = setInterval(fetchAnalyzeReport, 180000);
     return () => clearInterval(interval);
   }, [startDate, endDate]);
 
