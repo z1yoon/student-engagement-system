@@ -1,6 +1,8 @@
 # InsightFace model data
 insightface_data/
 insightface_data/*
+models/
+models/*
 
 # Backend
 backend/__pycache__/
