@@ -24,7 +24,7 @@ if not VISION_API_ENDPOINT or not VISION_API_KEY:
 vision_client = ImageAnalysisClient(VISION_API_ENDPOINT, AzureKeyCredential(VISION_API_KEY))
 
 # Model directory for InsightFace
-MODEL_DIR = "/tmp/insightface/models/buffalo_l"
+MODEL_DIR = "/models"
 download_lock = threading.Lock()
 
 def ensure_models_exist():
@@ -32,6 +32,7 @@ def ensure_models_exist():
     Checks if the InsightFace models exist and downloads them if necessary.
     """
     expected_folder = os.path.join(MODEL_DIR, "models")
+    os.makedirs(expected_folder, exist_ok=True)
     exists = os.path.exists(expected_folder) and len(os.listdir(expected_folder)) > 0
     logger.info("models_exist check: expected_folder=%s exists=%s", expected_folder, exists)
     if exists:

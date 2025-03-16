@@ -1,4 +1,6 @@
-.env
+insightface_data
+insightface_data/*
+
 # Backend
 backend/__pycache__/
 backend/*.pyc
