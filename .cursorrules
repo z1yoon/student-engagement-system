@@ -1,0 +1,240 @@
+# Student Engagement System - Project Structure and Standards
+# This system uses Azure IoT Hub for image capture and MediaPipe for student engagement analysis
+
+# Project Overview
+# - Mac Camera captures images every 5 minutes (manual start)
+# - Images are sent to Azure IoT Hub
+# - Azure Function processes images and sends to FastAPI backend
+# - Backend analyzes images using MediaPipe for:
+#   * Automated attendance through face recognition
+#   * Student engagement metrics (sleeping, phone usage, talking)
+# - Frontend displays attendance and engagement data
+
+# Directory Structure
+.
+├── backend/              # FastAPI backend
+│   ├── app.py           # Main FastAPI application
+│   ├── analyze.py       # MediaPipe-based image analysis
+│   ├── db.py           # Azure SQL Server operations
+│   ├── utils.py        # Utility functions
+│   ├── requirements.txt # Python dependencies
+│   └── Dockerfile      # Backend container configuration
+│
+├── frontend/            # React frontend
+│   ├── src/            # React source code
+│   ├── public/         # Static files
+│   ├── package.json    # Frontend dependencies
+│   └── Dockerfile      # Frontend container configuration
+│
+├── iot-device/         # IoT Device (Mac Camera)
+│   ├── capture_and_send.py  # Camera capture and IoT Hub upload
+│   ├── requirements.txt     # Camera dependencies
+│   └── README.md           # Camera setup instructions
+│
+├── IoTImageForwarder/  # Azure Function for image processing
+│   ├── function.json
+│   └── run.py
+│
+├── docker-compose.yml  # Docker compose configuration
+├── .env               # Environment variables
+├── .gitignore         # Git ignore rules
+└── README.md          # Project documentation
+
+# Coding Standards
+
+## Python (Backend)
+- Use type hints for function parameters and return values
+- Follow PEP 8 style guide
+- Use docstrings for all functions and classes
+- Log important events and errors
+- Handle exceptions gracefully
+- Use environment variables for configuration
+
+## IoT Hub Integration Standards
+- Use Azure IoT Hub SDK directly instead of REST API calls
+- Required packages: azure-iot-hub==2.6.1
+- Device connection:
+  * Use IoTHubDeviceClient.create_from_connection_string()
+  * No manual SAS token generation needed
+- Backend connection:
+  * Use IoTHubRegistryManager(IOT_HUB_CONNECTION_STRING)
+  * Use invoke_device_method() for direct method calls
+- Environment variables:
+  * IOT_HUB_CONNECTION_STRING: Full connection string from Azure
+  * DEVICE_ID: Registered device ID in IoT Hub
+- No need for API version specification (handled by SDK)
+- Keep error handling simple and informative
+
+## JavaScript/TypeScript (Frontend)
+- Use TypeScript for type safety
+- Follow ESLint and Prettier configurations
+- Use functional components with hooks
+- Implement proper error handling
+- Use environment variables for configuration
+
+## Database (Azure SQL Server)
+- Use Azure SQL Server (Free tier) - NO LOCAL DATABASE
+- Connection string format:
+  * DRIVER={ODBC Driver 18 for SQL Server}
+  * SERVER=tcp:nus-iot-db.database.windows.net,1433
+  * DATABASE=nus-iot-db
+  * UID=admin
+  * PWD=Nusiotproject123!
+  * Encrypt=Yes
+  * TrustServerCertificate=No
+  * Connection Timeout=30
+- Tables:
+  * Students (id, name, face_embedding, created_at, profile_image_url)
+  * Attendance (id, student_id, timestamp, image_url, confidence_score)
+  * Engagement (id, student_id, timestamp, sleeping, phone_usage, talking, gaze)
+- Follow naming conventions:
+  * Tables: PascalCase
+  * Columns: camelCase
+  * Primary keys: id
+  * Foreign keys: tableName_id
+- IMPORTANT: No local database container in docker-compose.yml
+- Use DB_CONNECTION_STRING from .env for Azure SQL Server connection
+
+## Student Recognition Process
+- Student Enrollment:
+  * Capture clear frontal face image
+  * Extract face embedding using MediaPipe Face Detection
+  * Store face embedding in Students table
+  * Save profile image to Azure Blob Storage
+  * Link profile image URL in database
+
+- Student Identification:
+  * Extract face embeddings from captured images
+  * Compare embeddings with stored student embeddings
+  * Use cosine similarity for face matching
+  * Set minimum similarity threshold (0.7)
+  * Record attendance with confidence score
+  * Handle multiple faces in single image
+  * Log unrecognized faces for review
+
+- Face Recognition Standards:
+  * Use MediaPipe Face Detection for consistent results
+  * Store face embeddings as normalized vectors
+  * Implement face alignment before embedding
+  * Handle varying lighting conditions
+  * Process multiple face angles
+  * Regular retraining with new images
+
+## API Endpoints
+- Use RESTful conventions
+- Version APIs (e.g., /api/v1/...)
+- Return consistent response formats
+- Include proper error handling
+- Use appropriate HTTP methods
+
+## Image Processing
+- Use MediaPipe for:
+  * Face detection and recognition
+  * Face embedding extraction
+  * Sleeping detection
+  * Phone usage detection
+  * Talking detection
+- Process images in RGB format
+- Handle image size limits
+- Implement proper error handling
+- Preprocess images for consistent results:
+  * Normalize lighting
+  * Align faces
+  * Resize to standard dimensions
+  * Convert to appropriate color space
+
+## Security
+- Use environment variables for sensitive data
+- Implement proper authentication
+- Use HTTPS for all communications
+- Sanitize user inputs
+- Follow OWASP security guidelines
+- Secure face embeddings storage
+- Encrypt sensitive data
+
+## Testing
+- Write unit tests for critical functions
+- Implement integration tests
+- Use pytest for Python tests
+- Use Jest for frontend tests
+- Maintain test coverage above 80%
+- Test face recognition accuracy
+- Validate embedding consistency
+
+## Documentation
+- Keep README.md up to date
+- Document API endpoints
+- Include setup instructions
+- Document environment variables
+- Maintain changelog
+- Document face recognition process
+- Include troubleshooting guides
+
+## Version Control
+- Use semantic versioning
+- Write meaningful commit messages
+- Create feature branches
+- Review code before merging
+- Keep commits atomic
+
+## Performance
+- Optimize image processing
+- Implement caching where appropriate
+- Use connection pooling
+- Monitor response times
+- Handle concurrent requests
+- Optimize face recognition speed
+- Cache frequent face comparisons
+
+## Monitoring
+- Log important events
+- Track error rates
+- Monitor system resources
+- Set up alerts for critical issues
+- Track API usage
+- Monitor recognition accuracy
+- Track false positives/negatives
+
+# Dependencies
+## Backend
+- FastAPI
+- MediaPipe
+- Azure IoT Hub SDK
+- Python 3.9+
+- NumPy
+- SciPy (for face embedding comparisons)
+- OpenCV
+
+## Frontend
+- React
+- TypeScript
+- Material-UI
+- Chart.js
+- Axios
+
+## IoT Device
+- OpenCV
+- Azure IoT Hub Device Client
+- Python 3.9+
+
+## Azure
+- IoT Hub
+- Function App
+- SQL Database (Free tier)
+- Storage Account
+- Blob Storage (for student images)
+
+# Environment Variables
+## Backend
+- IOT_HUB_CONNECTION_STRING
+- DEVICE_ID
+- DB_CONNECTION_STRING (Azure SQL Server connection string)
+- BLOB_CONNECTION_STRING
+- BLOB_CONTAINER_NAME
+- FACE_RECOGNITION_THRESHOLD=0.7
+
+## Frontend
+- REACT_APP_API_URL
+
+## IoT Device
+- CAPTURE_INTERVAL=300  # 5 minutes in seconds 
