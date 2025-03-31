@@ -5,11 +5,17 @@ services:
     build: ./backend
     volumes:
       - ./insightface_data:/models
+      - ./data:/app/data
     ports:
       - "8000:8000"
     env_file:
       - .env
     restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
 
   frontend:
     build: ./frontend

@@ -1,6 +1,40 @@
 # InsightFace model data
 insightface_data/
 insightface_data/*
+models/
+models/*
+*/models/
+**/models/
+
+# Model files and weights
+*.onnx
+*.bin
+*.pth
+*.h5
+*.pb
+*.tflite
+*.mlmodel
+*.weights
+*.pt
+
+# MediaPipe cache
+.mediapipe/
+*/.mediapipe/
+
+# Images and media files
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.mov
+*.avi
+*.webm
+
+# Large datasets
+data/
+datasets/
+*/data/
 
 # Backend
 backend/__pycache__/
@@ -37,6 +71,40 @@ docker-compose.dev.yml
 .idea/
 .DS_Store
 *.sw?
+Thumbs.db
+desktop.ini
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.bak
+*.swp
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Large log files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Ignore environment files
 .env
+.env.*
+!.env.example
+
+# Ignore Azure Function runtime files
+.python_packages
+.venv
+.func
+local.settings.json

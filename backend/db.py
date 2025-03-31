@@ -283,11 +283,11 @@ def get_capture_status():
         cursor.execute("SELECT capture_active FROM SystemSettings WHERE id = 1")
         row = cursor.fetchone()
         if row:
-            return {"capture_active": bool(row[0])}
+            return {"active": bool(row[0])}
         else:
-            return {"capture_active": False}
+            return {"active": False}
     except pyodbc.Error as e:
         logger.error(f"❌ Error fetching capture status: {e}")
-        return {"capture_active": False}
+        return {"active": False}
     finally:
         conn.close()

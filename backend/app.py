@@ -20,7 +20,7 @@ from db import (
     get_capture_status
 )
 from utils import upload_to_blob
-from analyze import analyze_image, get_face_app, prepare_image_for_face_detection
+from analyze import analyze_image, get_face_app, prepare_image_for_processing
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def enroll_student(payload: dict = Body(...)):
         raise HTTPException(status_code=400, detail=f"Invalid base64 data: {e}")
     try:
         # Use the unified image processing function for enrollment
-        processed_image, image_np, _, _ = prepare_image_for_face_detection(image_bytes, 320)
+        processed_image, image_np, image_np_bgr, _, _ = prepare_image_for_processing(image_bytes, 320)
         faces = get_face_app().get(image_np)
         if faces:
             embedding = getattr(faces[0], "embedding", None)
@@ -134,7 +134,7 @@ def get_analyze(start_date: str = None, end_date: str = None):
 def analyze_endpoint(payload: dict = Body(...)):
     """
     Endpoint to analyze an image (provided as a Base64 string).
-    Delegates the analysis to the analyze module.
+    Uses MediaPipe for face detection, gaze tracking, and engagement analysis.
     This endpoint is triggered by your Azure Function every minute.
     """
     global latest_annotated_image

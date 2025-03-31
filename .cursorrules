@@ -238,3 +238,70 @@
 
 ## IoT Device
 - CAPTURE_INTERVAL=300  # 5 minutes in seconds 
+
+---
+description: CursorRules for Student Engagement System
+version: 1.0
+alwaysApply: true
+
+# ==============================================================================
+# 1. PROJECT STRUCTURE
+# ==============================================================================
+folder_structure:
+  - path: backend
+    description: "FastAPI backend for image analysis and engagement evaluation"
+  - path: frontend
+    description: "React frontend for viewing insights"
+  - path: iot-device
+    description: "IoT device code for image capture and IoT Hub upload"
+  - path: functionApp
+    description: "Azure Function for image processing"
+
+# ==============================================================================
+# 2. FILE PROTECTION
+# ==============================================================================
+file_protection:
+  - path: ".env"
+    rules:
+      - action: forbid_edit
+        reason: "Environment variables are managed manually"
+
+# ==============================================================================
+# 3. CODE CONSTRAINTS
+# ==============================================================================
+code_constraints:
+  - name: "IoT Device Message Scheduling"
+    applies_to: ["iot-device/*.py"]
+    constraint: "Use CAPTURE_INTERVAL from .env"
+
+  - name: "FunctionApp Trigger"
+    applies_to: ["functionApp/*.py"]
+    constraint: "Preserve IoT Hub trigger mechanism"
+
+  - name: "Backend Communication"
+    applies_to: ["functionApp/*.py", "backend/*.py"]
+    constraint: "Maintain existing API contract"
+
+# ==============================================================================
+# 4. UI/UX STANDARDS
+# ==============================================================================
+ui_guidance:
+  applies_to: ["frontend/**"]
+  rules:
+    - "Use consistent UI components"
+    - "Follow existing API contract"
+
+# ==============================================================================
+# 5. DATABASE RULES
+# ==============================================================================
+db_consistency:
+  applies_to: ["backend/**", "iot-device/**"]
+  rule: "Maintain consistent schema across all modules"
+
+# ==============================================================================
+# 6. BEST PRACTICES
+# ==============================================================================
+best_practices:
+  - "Use consistent naming conventions"
+  - "Use environment variables for configuration"
+  - "Log key processing steps" 

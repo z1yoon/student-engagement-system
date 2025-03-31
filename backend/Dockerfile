@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
     unixodbc-dev \
+    # MediaPipe and OpenCV dependencies \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    ffmpeg \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -46,8 +50,11 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir msrest==0.7.1 azure-core==1.32.0 six==1.17.0 typing-extensions==4.13.0 \
     && pip install --no-cache-dir isodate==0.7.2 requests-oauthlib==2.0.0 oauthlib==3.2.2
 
+# Create models directory for InsightFace
+RUN mkdir -p /models
+
 # Copy the rest of the application
 COPY . .
 
 # Run the FastAPI application with uvicorn server
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"] 
