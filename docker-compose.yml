@@ -4,21 +4,18 @@ services:
   backend:
     build: ./backend
     volumes:
-      - ./insightface_data:/models
-      - ./data:/app/data
+      - ./backend:/app  # Mount backend code directory to container
     ports:
       - "8000:8000"
     env_file:
       - .env
     restart: always
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
 
   frontend:
     build: ./frontend
+    volumes:
+      - ./frontend:/app  # Mount frontend code directory to container
+      - /app/node_modules  # Prevent overriding node_modules with host directory
     ports:
       - "3000:3000"
     depends_on:

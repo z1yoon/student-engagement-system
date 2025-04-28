@@ -2,9 +2,8 @@ fastapi==0.110.0
 uvicorn==0.28.0
 pyodbc==5.1.0
 azure-storage-blob==12.19.0
-mediapipe==0.10.11
-azure-iot-device==2.14.0
 azure-iot-hub==2.6.1
+mediapipe==0.10.18
 requests==2.32.3
 python-dotenv==1.0.1
 opencv-python-headless==4.9.0.80
@@ -12,5 +11,4 @@ numpy==1.26.4
 scipy==1.12.0
 pydantic==2.7.1
 pillow==10.3.0
-onnxruntime==1.17.0
-insightface>=0.7.3 
+scikit-learn==1.2.2

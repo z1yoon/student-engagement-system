@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DEVICE_CONNECTION_STRING = os.getenv("DEVICE_CONNECTION_STRING", "")
-CAPTURE_INTERVAL = int(os.getenv("CAPTURE_INTERVAL", "300"))  # Default: 300s (5 minutes)
+CAPTURE_INTERVAL = int(os.getenv("CAPTURE_INTERVAL", "30"))  # Default: 300s (5 minutes)
 JPEG_QUALITY = 50  # Lower means smaller file size
 FRAME_WIDTH = 320
 FRAME_HEIGHT = 240

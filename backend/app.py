@@ -10,6 +10,7 @@ from azure.iot.hub.models import CloudToDeviceMethod
 from PIL import Image
 import numpy as np
 import uvicorn
+import cv2  # OpenCV for face detection and recognition
 
 # Import your helper modules
 from db import (
@@ -17,10 +18,16 @@ from db import (
     add_student,
     update_capture_status,
     get_analyze_results,
-    get_capture_status
+    get_capture_status,
+    student_exists
 )
 from utils import upload_to_blob
-from analyze import analyze_image, get_face_app, prepare_image_for_processing
+from analyze import (
+    analyze_image, 
+    prepare_image_for_processing, 
+    detect_faces_opencv_dnn,  # Using DNN detector instead of Haar Cascade
+    extract_face_features
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -58,46 +65,59 @@ latest_annotated_image = None
 def enroll_student(payload: dict = Body(...)):
     """
     Enrolls a new student by storing their name and uploading their image.
-    Computes a face embedding for later recognition using InsightFace.
+    Uses OpenCV DNN for accurate face detection and LBPH for feature extraction.
     """
     student_name = payload.get("student_name")
     image_data = payload.get("image_data")
     if not student_name or not image_data:
         raise HTTPException(status_code=400, detail="Missing student name or image data.")
+    
+    # Check if student already exists
+    if student_exists(student_name):
+        raise HTTPException(status_code=409, detail=f"Student '{student_name}' is already registered.")
+        
     try:
         image_bytes = base64.b64decode(
             image_data.split(",")[1] if "," in image_data else image_data
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid base64 data: {e}")
+        
+    face_embedding = None
     try:
-        # Use the unified image processing function for enrollment
-        processed_image, image_np, image_np_bgr, _, _ = prepare_image_for_processing(image_bytes, 320)
-        faces = get_face_app().get(image_np)
-        if faces:
-            embedding = getattr(faces[0], "embedding", None)
-            if embedding is not None:
-                try:
-                    embedding = np.array(embedding)
-                    face_embedding = embedding.tolist()
-                except Exception as ee:
-                    logger.error(f"Error converting embedding to numpy array: {ee}")
-                    face_embedding = None
-            else:
-                face_embedding = None
+        # Process image using CPU-efficient OpenCV
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img_np = np.array(img)
+        
+        # Detect faces using OpenCV DNN (more accurate than Haar Cascade)
+        faces = detect_faces_opencv_dnn(img_np)
+        
+        if len(faces) > 0:
+            # Use the first face detected (assumed to be the student)
+            face_rect = faces[0]  # (x, y, w, h)
+            
+            # Extract face features for identification
+            face_embedding = extract_face_features(img_np, face_rect)
+            
             if face_embedding is not None:
-                logger.info("✅ Face embedding computed for enrollment.")
+                # Convert embedding to list for storage
+                face_embedding = face_embedding.tolist()
+                logger.info("✅ Face embedding computed using LBPH after DNN detection")
             else:
-                logger.warning("⚠️ No valid face embedding computed during enrollment.")
+                logger.warning("⚠️ No face embedding could be generated")
         else:
-            face_embedding = None
-            logger.warning("⚠️ No face detected during enrollment.")
+            logger.warning("⚠️ No faces detected during enrollment")
     except Exception as e:
         logger.error(f"Error computing face embedding: {e}")
         face_embedding = None
+        
+    if not face_embedding:
+        logger.warning("⚠️ Unable to compute face embedding. Student may not be recognized later.")
+        
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"{student_name}_{timestamp}.jpg"
     blob_url = upload_to_blob(image_bytes, file_name)
+    
     add_student(student_name, None, face_embedding, blob_url)
     return {"message": "Student enrolled successfully!", "blob_url": blob_url}
 
@@ -134,8 +154,7 @@ def get_analyze(start_date: str = None, end_date: str = None):
 def analyze_endpoint(payload: dict = Body(...)):
     """
     Endpoint to analyze an image (provided as a Base64 string).
-    Uses MediaPipe for face detection, gaze tracking, and engagement analysis.
-    This endpoint is triggered by your Azure Function every minute.
+    Uses OpenCV for face detection and recognition, and MediaPipe for gaze tracking and engagement analysis.
     """
     global latest_annotated_image
     image_data = payload.get("image_data")

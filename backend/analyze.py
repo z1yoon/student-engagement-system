@@ -6,19 +6,20 @@ import numpy as np
 import cv2
 import mediapipe as mp
 from PIL import Image, ImageDraw, ImageFont
-import insightface
 from functools import lru_cache
 import threading
 import time
+import platform
+from sklearn.metrics.pairwise import cosine_similarity
+import urllib.request
 
 from db import add_engagement_record, mark_attendance, get_enrolled_students
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Model directory for InsightFace (used for face recognition)
-MODEL_DIR = "/models"
-download_lock = threading.Lock()
+# Threshold for eye aspect ratio to determine if eyes are closed
+EAR_THRESHOLD = 0.2
 
 # Initialize MediaPipe solutions
 mp_face_detection = mp.solutions.face_detection
@@ -28,7 +29,7 @@ mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
 # Load MediaPipe models with global variables for reuse
-face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
+face_detection_mp = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 face_mesh = mp_face_mesh.FaceMesh(
     max_num_faces=10,
     refine_landmarks=True,
@@ -40,50 +41,230 @@ pose_detector = mp_pose.Pose(
     min_tracking_confidence=0.5
 )
 
-# Engagement threshold constants
-GAZE_RATIO_THRESHOLD = 0.25  # Threshold for determining focus based on eye gaze
-EAR_THRESHOLD = 0.20        # Eye Aspect Ratio threshold for detecting drowsiness
-HEAD_POSE_THRESHOLD = 20.0  # Degree threshold for head pose
+# DNN model paths
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
+MODEL_FILE = os.path.join(MODEL_DIR, "opencv_face_detector_uint8.pb")
+CONFIG_FILE = os.path.join(MODEL_DIR, "opencv_face_detector.pbtxt")
 
-def ensure_models_exist():
-    """
-    Checks if the InsightFace models exist and downloads them if necessary.
-    """
-    expected_folder = os.path.join(MODEL_DIR, "models")
-    os.makedirs(expected_folder, exist_ok=True)
-    exists = os.path.exists(expected_folder) and len(os.listdir(expected_folder)) > 0
-    logger.info("models_exist check: expected_folder=%s exists=%s", expected_folder, exists)
-    if exists:
-        logger.info("✅ Models already exist in %s, skipping download.", MODEL_DIR)
-        return
-    with download_lock:
-        if os.path.exists(expected_folder) and len(os.listdir(expected_folder)) > 0:
-            logger.info("✅ Models already exist after acquiring lock, skipping download.")
-            return
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        logger.info("📥 Downloading InsightFace models into %s...", MODEL_DIR)
-        try:
-            temp_face_app = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR, download=True)
-            temp_face_app.prepare(ctx_id=-1, det_size=(640, 640))
-            logger.info("✅ Models downloaded and ready.")
-        except Exception as e:
-            logger.error(f"❌ Error downloading models: {e}")
-            raise
-
+# Load OpenCV face recognition model
 @lru_cache(maxsize=1)
-def get_face_app():
+def get_face_recognizer():
     """
-    Initializes and returns the face analysis app instance.
+    Initialize and return OpenCV's LBPH face recognizer.
     """
-    ensure_models_exist()
+    recognizer = cv2.face.LBPHFaceRecognizer_create()
+    logger.info("✅ OpenCV LBPH Face Recognizer initialized")
+    return recognizer
+
+# Load OpenCV Haar Cascade face detector (as fallback)
+@lru_cache(maxsize=1)
+def get_face_detector():
+    """
+    Load OpenCV's Haar Cascade face detector.
+    """
+    # Path to the Haar cascade XML file for face detection
+    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    face_detector = cv2.CascadeClassifier(cascade_path)
+    logger.info("✅ OpenCV Haar Cascade face detector loaded")
+    return face_detector
+
+# Load OpenCV DNN face detector
+@lru_cache(maxsize=1)
+def get_face_detector_dnn():
+    """
+    Load OpenCV's DNN-based face detector.
+    Uses a pre-trained Single Shot Multibox Detector (SSD) with ResNet base network.
+    """
     try:
-        face_app_instance = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR, download=False)
-        face_app_instance.prepare(ctx_id=-1, det_size=(640, 640))
-        logger.info("✅ FaceAnalysis initialized successfully.")
-        return face_app_instance
+        # Path to local model files (already downloaded)
+        model_file = MODEL_FILE
+        config_file = CONFIG_FILE
+        
+        # Check if files exist and are not empty
+        if not os.path.exists(model_file) or os.path.getsize(model_file) == 0:
+            logger.error(f"DNN model file missing or empty: {model_file}")
+            return None
+            
+        if not os.path.exists(config_file) or os.path.getsize(config_file) == 0:
+            logger.error(f"DNN config file missing or empty: {config_file}")
+            return None
+        
+        # Make sure directory exists
+        os.makedirs(os.path.dirname(model_file), exist_ok=True)
+        
+        # Load the model (protobuf + text config)
+        logger.info(f"Loading DNN model from {model_file} and {config_file}")
+        try:
+            # Use readNet instead of readNetFromTensorflow for better compatibility
+            net = cv2.dnn.readNet(model_file, config_file)
+            logger.info("✅ OpenCV DNN face detector loaded successfully")
+            return net
+        except cv2.error as e:
+            logger.error(f"OpenCV error loading model: {e}")
+            # Try alternative loading method
+            try:
+                logger.info("Trying alternative loading method...")
+                net = cv2.dnn.readNetFromTensorflow(model_file, config_file)
+                logger.info("✅ OpenCV DNN face detector loaded successfully with alternative method")
+                return net
+            except Exception as e2:
+                logger.error(f"Alternative loading method failed: {e2}")
+                return None
     except Exception as e:
-        logger.error(f"❌ Error initializing FaceAnalysis: {e}")
-        raise
+        logger.error(f"❌ Error loading DNN face detector: {e}")
+        return None
+
+def detect_faces_opencv(image_np):
+    """
+    Detect faces using OpenCV's Haar cascade classifier.
+    Returns a list of face rectangles (x, y, w, h).
+    """
+    try:
+        # Convert to grayscale for face detection
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        
+        # Get face detector
+        face_detector = get_face_detector()
+        
+        # Detect faces
+        faces = face_detector.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(30, 30)
+        )
+        
+        logger.info(f"✅ Detected {len(faces)} faces using OpenCV Haar Cascade")
+        return faces
+    except Exception as e:
+        logger.error(f"❌ Error in OpenCV Haar Cascade face detection: {e}")
+        return []
+
+def detect_faces_opencv_dnn(image_np):
+    """
+    Detect faces using OpenCV's DNN-based face detector.
+    Returns a list of face rectangles (x, y, w, h).
+    """
+    try:
+        # Get the DNN face detector
+        net = get_face_detector_dnn()
+        if net is None:
+            # Don't fall back to Haar cascade, just return empty result
+            logger.error("❌ DNN face detector not available and fallback disabled")
+            return []
+        
+        # Get image dimensions
+        h, w = image_np.shape[:2]
+        
+        # Create a blob from the image
+        blob = cv2.dnn.blobFromImage(
+            image_np, 
+            1.0,  # scale factor
+            (300, 300),  # spatial size required by the model
+            [104, 117, 123],  # mean subtraction
+            False,  # no crop
+            False  # BGR to RGB conversion not needed
+        )
+        
+        # Set the input to the network
+        net.setInput(blob)
+        
+        # Run a forward pass to get face detections
+        detections = net.forward()
+        
+        faces = []
+        confidence_threshold = 0.7
+        
+        # Loop over all detections
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            
+            # If we're confident enough it's a face
+            if confidence > confidence_threshold:
+                # Get the coordinates of the face rectangle
+                x1 = int(detections[0, 0, i, 3] * w)
+                y1 = int(detections[0, 0, i, 4] * h)
+                x2 = int(detections[0, 0, i, 5] * w)
+                y2 = int(detections[0, 0, i, 6] * h)
+                
+                # Ensure coordinates are within image bounds
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                
+                # Convert to (x, y, w, h) format
+                if x2 > x1 and y2 > y1:  # Ensure valid rectangle
+                    faces.append((x1, y1, x2 - x1, y2 - y1))
+        
+        logger.info(f"✅ Detected {len(faces)} faces using OpenCV DNN")
+        return faces
+    except Exception as e:
+        logger.error(f"❌ Error in OpenCV DNN face detection: {e}")
+        # Don't fall back to Haar cascade if DNN fails
+        return []
+
+def extract_face_features(image_np, face_rect):
+    """
+    Extract face features using Local Binary Patterns Histograms (LBPH)
+    Returns a feature vector that can be used for face recognition.
+    """
+    try:
+        # Convert to grayscale
+        gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+        
+        # Extract the face region
+        x, y, w, h = face_rect
+        roi_gray = gray[y:y+h, x:x+w]
+        
+        # Resize to a standard size for consistent feature extraction
+        roi_gray = cv2.resize(roi_gray, (100, 100))
+        
+        # Calculate LBP features - this will serve as our face embedding
+        # We flatten the histogram to create a feature vector
+        lbp = cv2.face.LBPHFaceRecognizer_create()
+        
+        # We need to train on a single image to get the histogram
+        # This is a workaround as we can't directly extract features
+        lbp.train([roi_gray], np.array([0]))
+        
+        # Get the histogram from the model
+        hist = lbp.getHistograms()[0]
+        feature_vector = hist.flatten()
+        
+        return feature_vector
+    except Exception as e:
+        logger.error(f"❌ Error extracting face features: {e}")
+        return None
+
+def compare_face_with_students_opencv(face_features, enrolled_students, threshold=0.6):
+    """
+    Compare extracted face features with enrolled student embeddings.
+    Returns the best match name and confidence score.
+    """
+    best_match = "Unknown"
+    best_score = 0
+    
+    if face_features is None:
+        return best_match, best_score
+    
+    for student in enrolled_students:
+        if not student.get("face_embedding"):
+            continue
+            
+        # Convert student face embedding to proper format
+        student_embedding = np.array(student["face_embedding"])
+        
+        # Check if embeddings are compatible (same length)
+        if len(face_features) != len(student_embedding):
+            continue
+            
+        # Calculate cosine similarity between feature vectors
+        similarity = cosine_similarity([face_features], [student_embedding])[0][0]
+        
+        if similarity > best_score and similarity > threshold:
+            best_score = similarity
+            best_match = student["name"]
+    
+    return best_match, best_score
 
 def prepare_image_for_processing(image_bytes: bytes, max_size: int = 320):
     """
@@ -235,7 +416,7 @@ def analyze_face_with_mediapipe(image_np, image_np_bgr, image_shape):
     Analyze face using MediaPipe for engagement metrics
     """
     # Process with MediaPipe Face Detection
-    face_detection_results = face_detection.process(image_np)
+    face_detection_results = face_detection_mp.process(image_np)
     
     # Process with MediaPipe Face Mesh
     face_mesh_results = face_mesh.process(image_np)
@@ -311,87 +492,55 @@ def normalize_embedding(embedding):
         return emb
     return emb / norm
 
-def average_embeddings(embeddings):
-    """
-    Averages a list of normalized embeddings.
-    """
-    if not embeddings:
-        return None
-    avg_emb = np.mean(np.stack(embeddings), axis=0)
-    return normalize_embedding(avg_emb)
-
+# Main face detection and recognition function using OpenCV DNN + LBPH
 def detect_faces_with_recognition_from_np(image_np):
     """
-    Accepts a numpy array (from the processed image) and performs face detection.
-    Returns face info, recognized students, and a boolean indicating if any face was detected.
+    Accepts a numpy array and performs face detection using DNN detector
+    and recognition using LBPH. Returns face info, recognized students, 
+    and a boolean indicating if any face was detected.
     """
     try:
-        # Wrap face detection in a try/except in case InsightFace raises an error.
-        try:
-            faces = get_face_app().get(image_np)
-        except Exception as e:
-            logger.error("Error during face detection: %s", e)
+        # Use OpenCV DNN for face detection (no fallback to Haar Cascade)
+        faces = detect_faces_opencv_dnn(image_np)
+        
+        if len(faces) == 0:
+            logger.warning("⚠️ No faces detected in the image using DNN detector.")
             return [], {}, False
-
+            
         results = []
         recognized_students = {}
         enrolled_students = get_enrolled_students()
-
-        # Process enrolled embeddings: assume each student has an averaged embedding.
-        enrolled_embeddings = [
-            normalize_embedding(student["face_embedding"])
-            for student in enrolled_students if student.get("face_embedding")
-        ]
-        enrolled_names = [
-            student["name"]
-            for student in enrolled_students if student.get("face_embedding")
-        ]
-
-        if not faces:
-            logger.warning("⚠️ No faces detected in the image (resized).")
-            return [], {}, False
-
-        # Process faces detected by InsightFace
-        for idx, face in enumerate(faces):
-            logger.info(f"Face {idx}: bbox={face.bbox}")
+        
+        # Process each detected face
+        for idx, (x, y, w, h) in enumerate(faces):
             face_id = f"face_{idx}"
-            bbox = face.bbox
             
+            # Create face info for the UI
             face_info = {
                 "face_id": face_id,
                 "face_rectangle": {
-                    "left": int(bbox[0]),
-                    "top": int(bbox[1]),
-                    "width": int(bbox[2] - bbox[0]),
-                    "height": int(bbox[3] - bbox[1])
+                    "left": int(x),
+                    "top": int(y),
+                    "width": int(w),
+                    "height": int(h)
                 },
                 # These will be filled in later with MediaPipe analysis
                 "gaze": "unknown",
                 "sleeping": False
             }
             results.append(face_info)
-
-            recognized = "Unknown"
-            embedding = getattr(face, "embedding", None)
-            if embedding is not None:
-                try:
-                    embedding = np.array(embedding)
-                    embedding = normalize_embedding(embedding)
-                except Exception as e:
-                    logger.error(f"Error converting embedding to numpy array: {e}")
-                    embedding = None
-                if embedding is not None and len(enrolled_embeddings) > 0:
-                    distances = [np.linalg.norm(embedding - emb) for emb in enrolled_embeddings]
-                    min_distance = min(distances) if distances else 9999
-                    logger.info(f"Face {idx} min_distance: {min_distance}")
-                    # For normalized embeddings, a typical threshold might be around 1.2 (adjust as necessary)
-                    if min_distance < 1.2:
-                        recognized = enrolled_names[np.argmin(distances)]
-            recognized_students[face_id] = recognized
-
+            
+            # Extract features for recognition using LBPH
+            face_features = extract_face_features(image_np, (x, y, w, h))
+            
+            # Match with enrolled students
+            recognized_name, score = compare_face_with_students_opencv(face_features, enrolled_students)
+            recognized_students[face_id] = recognized_name
+            logger.info(f"Face {idx} recognized as {recognized_name} with score {score:.2f}")
+        
         return results, recognized_students, True
     except Exception as e:
-        logger.error(f"Error detecting faces: {e}")
+        logger.error(f"Error detecting faces with DNN: {e}")
         return [], {}, False
 
 def draw_faces_on_image(image_bytes, faces_info, recognized_students, phone_detected=False):
@@ -459,7 +608,7 @@ def analyze_image(image_data: str):
         # Prepare the image for processing
         processed_image, image_np, image_np_bgr, orig_size, resized_size = prepare_image_for_processing(image_bytes, 320)
         
-        # Analyze faces using InsightFace for recognition
+        # Analyze faces using OpenCV for recognition
         faces_info, recognized_students, face_detected = detect_faces_with_recognition_from_np(image_np)
         
         if not face_detected:
@@ -476,16 +625,15 @@ def analyze_image(image_data: str):
         # Use MediaPipe for engagement analysis
         mediapipe_faces, phone_detected = analyze_face_with_mediapipe(image_np, image_np_bgr, image_np.shape)
         
-        # Merge MediaPipe analysis results with InsightFace recognition results
-        # This is a simple approach - in a production system, you might want more sophisticated matching
+        # Merge MediaPipe analysis results with OpenCV recognition results
         if len(faces_info) > 0 and len(mediapipe_faces) > 0:
             # Match faces based on the overlap of bounding boxes
-            for insightface_face in faces_info:
+            for opencv_face in faces_info:
                 best_match = None
                 max_overlap = 0
                 
-                # Get the InsightFace face rectangle
-                rect1 = insightface_face["face_rectangle"]
+                # Get the OpenCV face rectangle
+                rect1 = opencv_face["face_rectangle"]
                 box1 = (rect1["left"], rect1["top"], rect1["left"] + rect1["width"], rect1["top"] + rect1["height"])
                 
                 # Find the best matching MediaPipe face
@@ -502,10 +650,10 @@ def analyze_image(image_data: str):
                         max_overlap = overlap_area
                         best_match = mediapipe_face
                 
-                # Update the InsightFace face info with MediaPipe engagement analysis
+                # Update the OpenCV face info with MediaPipe engagement analysis
                 if best_match:
-                    insightface_face["gaze"] = best_match["gaze"]
-                    insightface_face["sleeping"] = best_match["sleeping"]
+                    opencv_face["gaze"] = best_match["gaze"]
+                    opencv_face["sleeping"] = best_match["sleeping"]
         
         # Process attendance and engagement for each recognized face
         for face in faces_info:

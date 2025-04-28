@@ -2,25 +2,21 @@ FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies for OpenCV and MediaPipe
 RUN apt-get update && apt-get install -y \
     build-essential \
-    g++ \
-    cmake \
-    libopenblas-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    ffmpeg \
     uuid-dev \
     libssl-dev \
     curl \
     gnupg \
     unixodbc-dev \
-    # MediaPipe and OpenCV dependencies \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    ffmpeg \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Microsoft ODBC Driver - with fix for package conflicts
+# Install Microsoft ODBC Driver for SQL Server
 RUN curl -sSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
     && curl -sSL https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
@@ -35,26 +31,21 @@ RUN curl -sSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - 
 # Set ODBC environment variables
 ENV ODBCINI=/etc/odbc.ini
 ENV ODBCSYSINI=/etc
-ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu
 
-# Copy requirements first for better layer caching
+# Copy requirements.txt
 COPY requirements.txt .
 
 # Set environment variables to address OpenSSL deprecation warnings
 ENV PYTHONWARNINGS="ignore::DeprecationWarning:OpenSSL"
 ENV OPENSSL_CONF=/dev/null
 
-# Install Python dependencies without problematic packages
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir msrest==0.7.1 azure-core==1.32.0 six==1.17.0 typing-extensions==4.13.0 \
-    && pip install --no-cache-dir isodate==0.7.2 requests-oauthlib==2.0.0 oauthlib==3.2.2
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Create models directory for InsightFace
-RUN mkdir -p /models
-
-# Copy the rest of the application
+# Copy the rest of the application (including pre-downloaded models in models/ directory)
 COPY . .
 
 # Run the FastAPI application with uvicorn server
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

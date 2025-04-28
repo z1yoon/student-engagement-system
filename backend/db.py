@@ -100,6 +100,23 @@ def get_enrolled_students():
     finally:
         conn.close()
 
+def student_exists(name):
+    """
+    Check if a student with the given name already exists in the database.
+    Returns True if student exists, False otherwise.
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM Students WHERE student_name = ?", (name,))
+        count = cursor.fetchone()[0]
+        return count > 0
+    except pyodbc.Error as e:
+        logger.error(f"❌ Error checking if student exists: {e}")
+        return False
+    finally:
+        conn.close()
+
 def add_student(name, face_id=None, face_embedding=None, image_url=None):
     conn = get_db_connection()
     try:
@@ -226,6 +243,34 @@ def update_capture_status(active: bool):
     finally:
         conn.close()
 
+def get_enrolled_student_details():
+    """
+    Get basic details about all enrolled students regardless of engagement or attendance.
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT student_name, image_url FROM Students")
+        rows = cursor.fetchall()
+        result = {}
+        for row in rows:
+            name = row[0]
+            image_url = row[1]
+            result[name] = {
+                "focused": 0,
+                "distracted": 0, 
+                "phone_usage": 0,
+                "sleeping": 0,
+                "attended": False,
+                "image_url": image_url
+            }
+        return result
+    except pyodbc.Error as e:
+        logger.error(f"❌ Error fetching enrolled student details: {e}")
+        return {}
+    finally:
+        conn.close()
+
 def get_analyze_results(start_date=None, end_date=None):
     engagement_records = get_engagement_records(start_date, end_date)
     attendance_records = get_attendance_records(start_date, end_date)
@@ -235,7 +280,8 @@ def get_analyze_results(start_date=None, end_date=None):
     if not attendance_records:
         logger.warning("⚠️ No attendance records found!")
 
-    summary = {}
+    # Get all enrolled students to use as base data
+    summary = get_enrolled_student_details()
 
     for record in engagement_records:
         name = record["student_name"]
@@ -269,10 +315,12 @@ def get_analyze_results(start_date=None, end_date=None):
                 "image_url": None
             }
         summary[name]["attended"] = record["is_attended"]
-        summary[name]["image_url"] = record["image_url"]
+        # Only update image_url if it's not set yet or the current one is None
+        if not summary[name]["image_url"] and record["image_url"]:
+            summary[name]["image_url"] = record["image_url"]
 
     if not summary:
-        return {"message": "No engagement or attendance data found."}
+        return {"message": "No students enrolled or engagement data found."}
 
     return summary
 
