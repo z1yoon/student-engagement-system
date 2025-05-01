@@ -2,21 +2,31 @@ FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for OpenCV and MediaPipe
+# Install system dependencies for ARM64/Apple Silicon
 RUN apt-get update && apt-get install -y \
     build-essential \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    ffmpeg \
+    g++ \
+    cmake \
+    libopenblas-dev \
     uuid-dev \
     libssl-dev \
     curl \
     gnupg \
     unixodbc-dev \
+    # MediaPipe and OpenCV dependencies \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    ffmpeg \
+    # InsightFace specific dependencies \
+    libgfortran5 \
+    libatlas-base-dev \
+    libhdf5-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Microsoft ODBC Driver for SQL Server
+# Install Microsoft ODBC Driver - with fix for package conflicts
 RUN curl -sSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
     && curl -sSL https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
@@ -40,11 +50,11 @@ COPY requirements.txt .
 ENV PYTHONWARNINGS="ignore::DeprecationWarning:OpenSSL"
 ENV OPENSSL_CONF=/dev/null
 
-# Install Python dependencies
+# Install Python dependencies using requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application (including pre-downloaded models in models/ directory)
+# Copy the rest of the application
 COPY . .
 
 # Run the FastAPI application with uvicorn server

@@ -2,13 +2,12 @@ import logging
 import json
 import os
 import azure.functions as func
-import aiohttp  # Replace requests with aiohttp for async support
-import asyncio
+import requests  # Ensure requests is in your requirements.txt
 
 # Replace with your publicly accessible backend API URL (e.g. via ngrok)
 BACKEND_API_URL = os.getenv("BACKEND_API_URL", "")
 
-async def main(event: func.EventHubEvent):
+def main(event: func.EventHubEvent):
     """
     This Azure Function is triggered by IoT Hub messages (via Event Hub trigger).
     It expects a JSON payload with an "image_data" field containing a Base64‑encoded image.
@@ -29,17 +28,11 @@ async def main(event: func.EventHubEvent):
         return
 
     try:
-        # Forward the image data to the backend API using async pattern
-        async with aiohttp.ClientSession() as session:
-            async with session.post(BACKEND_API_URL, json={"image_data": image_data}) as response:
-                if response.status == 200:
-                    result = await response.text()
-                    logging.info("✅ Successfully forwarded image to backend. Response: %s", result)
-                else:
-                    error_text = await response.text()
-                    logging.error("❌ Backend API error: %s", error_text)
+        # Forward the image data to the backend API (no additional decoding is needed here)
+        response = requests.post(BACKEND_API_URL, json={"image_data": image_data})
+        if response.status_code == 200:
+            logging.info("✅ Successfully forwarded image to backend. Response: %s", response.text)
+        else:
+            logging.error("❌ Backend API error: %s", response.text)
     except Exception as e:
         logging.error("❌ Error calling backend API: %s", e)
-    
-    # Make sure all telemetry is flushed before function completes
-    await asyncio.sleep(0.1)  # Small delay to ensure logging completes

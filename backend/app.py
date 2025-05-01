@@ -5,14 +5,11 @@ import logging
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from azure.iot.hub import IoTHubRegistryManager
 from azure.iot.hub.models import CloudToDeviceMethod
-from PIL import Image
 import numpy as np
-import uvicorn
-import cv2  # OpenCV for face detection and recognition
-
-# Import your helper modules
+import json
 from db import (
     create_tables,
     add_student,
@@ -22,32 +19,58 @@ from db import (
     student_exists
 )
 from utils import upload_to_blob
-from analyze import (
-    analyze_image, 
-    prepare_image_for_processing, 
-    detect_faces_opencv_dnn,  # Using DNN detector instead of Haar Cascade
-    extract_face_features
-)
+from analyze import analyze_image, prepare_image_for_processing
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Adjust for production as needed
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Initialize DB tables if they don't exist
-create_tables()
-
+# Constants
 IOT_HUB_CONNECTION_STRING = os.getenv("IOT_HUB_CONNECTION_STRING", "")
 DEVICE_ID = os.getenv("DEVICE_ID", "Mac01")
 
+class NumpyJSONResponse(JSONResponse):
+    """Custom JSON response class that handles NumPy data types"""
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content,
+            default=self._serialize_numpy,
+            ensure_ascii=False,
+            allow_nan=True,
+            indent=None,
+            separators=(",", ":")
+        ).encode("utf-8")
+
+    @staticmethod
+    def _serialize_numpy(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+def convert_numpy_types(obj):
+    """Recursively convert NumPy types to standard Python types"""
+    if isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(i) for i in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    else:
+        return obj
+
 def invoke_direct_method(method_name, payload=None):
+    """Invoke a direct method on the IoT device"""
     registry_manager = IoTHubRegistryManager(IOT_HUB_CONNECTION_STRING)
     method_request = CloudToDeviceMethod(method_name=method_name, payload=payload or {})
     try:
@@ -58,124 +81,137 @@ def invoke_direct_method(method_name, payload=None):
         logger.error(f"❌ Failed to invoke {method_name}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Global variable to store the latest annotated image (updated by analyze_image)
-latest_annotated_image = None
+# Initialize FastAPI app
+app = FastAPI()
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return NumpyJSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request, exc):
+    return NumpyJSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+    )
+
+# Create tables on startup
+create_tables()
 
 @app.post("/api/enroll-student/")
 def enroll_student(payload: dict = Body(...)):
-    """
-    Enrolls a new student by storing their name and uploading their image.
-    Uses OpenCV DNN for accurate face detection and LBPH for feature extraction.
-    """
+    """API endpoint for enrolling a new student with face recognition"""
     student_name = payload.get("student_name")
     image_data = payload.get("image_data")
+    
+    # Input validation
     if not student_name or not image_data:
         raise HTTPException(status_code=400, detail="Missing student name or image data.")
-    
-    # Check if student already exists
     if student_exists(student_name):
         raise HTTPException(status_code=409, detail=f"Student '{student_name}' is already registered.")
-        
+    
     try:
+        # Decode base64 image
         image_bytes = base64.b64decode(
             image_data.split(",")[1] if "," in image_data else image_data
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid base64 data: {e}")
-        
-    face_embedding = None
+    
     try:
-        # Process image using CPU-efficient OpenCV
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img_np = np.array(img)
-        
-        # Detect faces using OpenCV DNN (more accurate than Haar Cascade)
-        faces = detect_faces_opencv_dnn(img_np)
-        
-        if len(faces) > 0:
-            # Use the first face detected (assumed to be the student)
-            face_rect = faces[0]  # (x, y, w, h)
-            
-            # Extract face features for identification
-            face_embedding = extract_face_features(img_np, face_rect)
-            
-            if face_embedding is not None:
-                # Convert embedding to list for storage
-                face_embedding = face_embedding.tolist()
-                logger.info("✅ Face embedding computed using LBPH after DNN detection")
-            else:
-                logger.warning("⚠️ No face embedding could be generated")
-        else:
-            logger.warning("⚠️ No faces detected during enrollment")
-    except Exception as e:
-        logger.error(f"Error computing face embedding: {e}")
+        # Process image and extract face embedding
+        processed_image, image_np, image_np_bgr = prepare_image_for_processing(image_bytes)
         face_embedding = None
         
-    if not face_embedding:
-        logger.warning("⚠️ Unable to compute face embedding. Student may not be recognized later.")
+        from analyze import get_face_app
+        face_app = get_face_app()
+        faces = face_app.get(image_np_bgr)
         
+        if faces and len(faces) > 0:
+            embedding = getattr(faces[0], 'embedding', None)
+            if embedding is not None:
+                face_embedding = embedding.tolist()
+                logger.info(f"✅ Face embedding computed for {student_name}")
+                # Print the face embedding (first 10 values for brevity)
+                embedding_sample = face_embedding[:10]
+                logger.info(f"Face embedding sample (first 10 values): {embedding_sample}")
+            else:
+                logger.warning("⚠️ Face detected but no embedding computed")
+        else:
+            logger.warning("⚠️ No face detected during enrollment")
+    except Exception as e:
+        logger.error(f"Error during image processing: {e}")
+        face_embedding = None
+    
+    # Save student image and add to database
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = f"{student_name}_{timestamp}.jpg"
     blob_url = upload_to_blob(image_bytes, file_name)
-    
     add_student(student_name, None, face_embedding, blob_url)
-    return {"message": "Student enrolled successfully!", "blob_url": blob_url}
+    
+    return {
+        "message": "Student enrolled successfully!",
+        "blob_url": blob_url,
+        "face_embedding_sample": face_embedding[:10] if face_embedding else None
+    }
 
 @app.post("/api/start-capture")
 def start_capture():
-    """
-    Tells the device to start capturing images.
-    """
+    """API endpoint for starting the image capture process"""
     update_capture_status(True)
     response = invoke_direct_method("startCapture")
     return {"message": "Capture command sent.", "response": response.as_dict()}
 
 @app.post("/api/stop-capture")
 def stop_capture():
-    """
-    Tells the device to stop capturing images.
-    """
+    """API endpoint for stopping the image capture process"""
     update_capture_status(False)
     response = invoke_direct_method("stopCapture")
     return {"message": "Stop capture command sent.", "response": response.as_dict()}
 
 @app.get("/api/analyze_results")
 def get_analyze(start_date: str = None, end_date: str = None):
-    """
-    Returns a summary of engagement and attendance data.
-    Also includes the latest annotated image from the analysis.
-    """
+    """API endpoint for getting student engagement analysis results"""
     summary = get_analyze_results(start_date, end_date)
-    if latest_annotated_image:
-        summary["latest_annotated_image"] = latest_annotated_image
-    return summary
+    # Remove latest_annotated_image from the response as requested
+    if "latest_annotated_image" in summary:
+        del summary["latest_annotated_image"]
+    return convert_numpy_types(summary)
 
 @app.post("/api/analyze_image")
 def analyze_endpoint(payload: dict = Body(...)):
-    """
-    Endpoint to analyze an image (provided as a Base64 string).
-    Uses OpenCV for face detection and recognition, and MediaPipe for gaze tracking and engagement analysis.
-    """
-    global latest_annotated_image
+    """API endpoint for analyzing a single image"""
     image_data = payload.get("image_data")
     if not image_data:
         raise HTTPException(status_code=400, detail="Missing image data.")
+    
     try:
         result = analyze_image(image_data)
-        if result.get("annotated_image"):
-            latest_annotated_image = result["annotated_image"]
-        return result
+        return NumpyJSONResponse(content=convert_numpy_types(result))
     except Exception as e:
         logger.error(f"Error during image analysis: {e}")
-        return {"error": "Failed to analyze image", "face_detected": False}
+        return NumpyJSONResponse(
+            content={"error": "Failed to analyze image", "face_detected": False}
+        )
 
 @app.get("/api/capture-status")
 def capture_status():
-    """
-    Returns the current capture status from the SystemSettings table.
-    """
+    """API endpoint for checking the current capture status"""
     status = get_capture_status()
-    return status
+    return convert_numpy_types(status)
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

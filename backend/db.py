@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING", "")
 
 def get_db_connection():
+    """Get a connection to the database"""
     try:
         conn = pyodbc.connect(DB_CONNECTION_STRING)
         return conn
@@ -17,12 +18,14 @@ def get_db_connection():
         raise
 
 def create_tables():
+    """Create required database tables if they don't exist"""
     conn = get_db_connection()
     if not conn:
         return
     try:
         cursor = conn.cursor()
 
+        # Create Students table
         cursor.execute(
             "IF OBJECT_ID('Students', 'U') IS NULL BEGIN "
             "CREATE TABLE Students ("
@@ -34,6 +37,7 @@ def create_tables():
             "END"
         )
 
+        # Create AttendanceRecords table
         cursor.execute(
             "IF OBJECT_ID('AttendanceRecords', 'U') IS NULL BEGIN "
             "CREATE TABLE AttendanceRecords ("
@@ -46,6 +50,7 @@ def create_tables():
             "END"
         )
 
+        # Create EngagementRecords table
         cursor.execute(
             "IF OBJECT_ID('EngagementRecords', 'U') IS NULL BEGIN "
             "CREATE TABLE EngagementRecords ("
@@ -58,6 +63,7 @@ def create_tables():
             "END"
         )
 
+        # Create SystemSettings table
         cursor.execute(
             "IF OBJECT_ID('SystemSettings', 'U') IS NULL BEGIN "
             "CREATE TABLE SystemSettings ("
@@ -75,6 +81,7 @@ def create_tables():
         conn.close()
 
 def get_enrolled_students():
+    """Get all students with face embeddings for recognition"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -101,10 +108,7 @@ def get_enrolled_students():
         conn.close()
 
 def student_exists(name):
-    """
-    Check if a student with the given name already exists in the database.
-    Returns True if student exists, False otherwise.
-    """
+    """Check if a student with the given name already exists"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -118,6 +122,7 @@ def student_exists(name):
         conn.close()
 
 def add_student(name, face_id=None, face_embedding=None, image_url=None):
+    """Add a new student to the database"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -134,6 +139,7 @@ def add_student(name, face_id=None, face_embedding=None, image_url=None):
         conn.close()
 
 def mark_attendance(student_name, is_attended, image_data):
+    """Record student attendance with image data"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -153,6 +159,7 @@ def mark_attendance(student_name, is_attended, image_data):
         conn.close()
 
 def add_engagement_record(student_name, phone_detected, gaze, sleeping):
+    """Add an engagement record for a student"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -168,6 +175,7 @@ def add_engagement_record(student_name, phone_detected, gaze, sleeping):
         conn.close()
 
 def get_engagement_records(start_date=None, end_date=None):
+    """Get engagement records with optional date filtering"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -201,6 +209,7 @@ def get_engagement_records(start_date=None, end_date=None):
         conn.close()
 
 def get_attendance_records(start_date=None, end_date=None):
+    """Get attendance records with optional date filtering"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -233,6 +242,7 @@ def get_attendance_records(start_date=None, end_date=None):
         conn.close()
 
 def update_capture_status(active: bool):
+    """Update system capture status"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -244,25 +254,21 @@ def update_capture_status(active: bool):
         conn.close()
 
 def get_enrolled_student_details():
-    """
-    Get basic details about all enrolled students regardless of engagement or attendance.
-    """
+    """Get basic details about enrolled students without images"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT student_name, image_url FROM Students")
+        cursor.execute("SELECT student_name FROM Students")
         rows = cursor.fetchall()
         result = {}
         for row in rows:
             name = row[0]
-            image_url = row[1]
             result[name] = {
                 "focused": 0,
                 "distracted": 0, 
                 "phone_usage": 0,
                 "sleeping": 0,
-                "attended": False,
-                "image_url": image_url
+                "attended": False
             }
         return result
     except pyodbc.Error as e:
@@ -272,6 +278,8 @@ def get_enrolled_student_details():
         conn.close()
 
 def get_analyze_results(start_date=None, end_date=None):
+    """Aggregate engagement and attendance data for all students"""
+    # Get raw records
     engagement_records = get_engagement_records(start_date, end_date)
     attendance_records = get_attendance_records(start_date, end_date)
 
@@ -280,9 +288,10 @@ def get_analyze_results(start_date=None, end_date=None):
     if not attendance_records:
         logger.warning("⚠️ No attendance records found!")
 
-    # Get all enrolled students to use as base data
+    # Start with base student data
     summary = get_enrolled_student_details()
 
+    # Process engagement records
     for record in engagement_records:
         name = record["student_name"]
         if name not in summary:
@@ -291,18 +300,22 @@ def get_analyze_results(start_date=None, end_date=None):
                 "distracted": 0,
                 "phone_usage": 0,
                 "sleeping": 0,
-                "attended": False,
-                "image_url": None
+                "attended": False
             }
+        
+        # Update engagement metrics
         if record["gaze"] == "focused":
             summary[name]["focused"] += 1
         else:
             summary[name]["distracted"] += 1
+            
         if record["phone_detected"]:
             summary[name]["phone_usage"] += 1
+            
         if record["sleeping"]:
             summary[name]["sleeping"] += 1
 
+    # Process attendance records
     for record in attendance_records:
         name = record["recognized_name"]
         if name not in summary:
@@ -311,13 +324,9 @@ def get_analyze_results(start_date=None, end_date=None):
                 "distracted": 0,
                 "phone_usage": 0,
                 "sleeping": 0,
-                "attended": False,
-                "image_url": None
+                "attended": False
             }
         summary[name]["attended"] = record["is_attended"]
-        # Only update image_url if it's not set yet or the current one is None
-        if not summary[name]["image_url"] and record["image_url"]:
-            summary[name]["image_url"] = record["image_url"]
 
     if not summary:
         return {"message": "No students enrolled or engagement data found."}
@@ -325,6 +334,7 @@ def get_analyze_results(start_date=None, end_date=None):
     return summary
 
 def get_capture_status():
+    """Get the current capture active status"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
