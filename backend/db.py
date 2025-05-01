@@ -6,6 +6,7 @@ import pyodbc
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Make DB_CONNECTION_STRING available to import
 DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING", "")
 
 def get_db_connection():
@@ -19,66 +20,125 @@ def get_db_connection():
 
 def create_tables():
     """Create required database tables if they don't exist"""
-    conn = get_db_connection()
-    if not conn:
-        return
+    logger.info("🔍 Attempting to create database tables...")
+    
+    # Check DB connection string
+    if not DB_CONNECTION_STRING:
+        logger.error("❌ Database connection string is empty! Check your environment variables.")
+        return False
+    
     try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("❌ Failed to get database connection")
+            return False
+            
         cursor = conn.cursor()
+        
+        # Log database info
+        try:
+            cursor.execute("SELECT @@version")
+            version = cursor.fetchone()[0]
+            logger.info(f"✅ Connected to database: {version}")
+        except Exception as e:
+            logger.error(f"❌ Error getting database version: {e}")
 
         # Create Students table
-        cursor.execute(
-            "IF OBJECT_ID('Students', 'U') IS NULL BEGIN "
-            "CREATE TABLE Students ("
-            "id INT IDENTITY(1,1) PRIMARY KEY, "
-            "student_name VARCHAR(100) NOT NULL UNIQUE, "
-            "face_id VARCHAR(255) NULL, "
-            "face_embedding TEXT NULL, "
-            "image_url VARCHAR(255) NULL) "
-            "END"
-        )
+        try:
+            cursor.execute(
+                "IF OBJECT_ID('dbo.Students', 'U') IS NULL BEGIN "
+                "CREATE TABLE Students ("
+                "id INT IDENTITY(1,1) PRIMARY KEY, "
+                "student_name VARCHAR(100) NOT NULL UNIQUE, "
+                "face_id VARCHAR(255) NULL, "
+                "face_embedding TEXT NULL, "
+                "image_url VARCHAR(255) NULL) "
+                "END"
+            )
+            logger.info("✅ Students table checked/created")
+        except pyodbc.Error as e:
+            logger.error(f"❌ Error creating Students table: {e}")
+            return False
 
         # Create AttendanceRecords table
-        cursor.execute(
-            "IF OBJECT_ID('AttendanceRecords', 'U') IS NULL BEGIN "
-            "CREATE TABLE AttendanceRecords ("
-            "id INT IDENTITY(1,1) PRIMARY KEY, "
-            "timestamp DATETIME DEFAULT GETUTCDATE(), "
-            "student_id INT NULL, "
-            "recognized_name VARCHAR(100) NOT NULL, "
-            "image_url TEXT NULL, "
-            "is_attended BIT NOT NULL) "
-            "END"
-        )
+        try:
+            cursor.execute(
+                "IF OBJECT_ID('dbo.AttendanceRecords', 'U') IS NULL BEGIN "
+                "CREATE TABLE AttendanceRecords ("
+                "id INT IDENTITY(1,1) PRIMARY KEY, "
+                "timestamp DATETIME DEFAULT GETUTCDATE(), "
+                "student_id INT NULL, "
+                "recognized_name VARCHAR(100) NOT NULL, "
+                "image_url TEXT NULL, "
+                "is_attended BIT NOT NULL) "
+                "END"
+            )
+            logger.info("✅ AttendanceRecords table checked/created")
+        except pyodbc.Error as e:
+            logger.error(f"❌ Error creating AttendanceRecords table: {e}")
+            return False
 
         # Create EngagementRecords table
-        cursor.execute(
-            "IF OBJECT_ID('EngagementRecords', 'U') IS NULL BEGIN "
-            "CREATE TABLE EngagementRecords ("
-            "id INT IDENTITY(1,1) PRIMARY KEY, "
-            "timestamp DATETIME DEFAULT GETUTCDATE(), "
-            "student_name VARCHAR(100) NOT NULL, "
-            "phone_detected BIT NOT NULL, "
-            "gaze VARCHAR(50) NOT NULL, "
-            "sleeping BIT NOT NULL) "
-            "END"
-        )
+        try:
+            cursor.execute(
+                "IF OBJECT_ID('dbo.EngagementRecords', 'U') IS NULL BEGIN "
+                "CREATE TABLE EngagementRecords ("
+                "id INT IDENTITY(1,1) PRIMARY KEY, "
+                "timestamp DATETIME DEFAULT GETUTCDATE(), "
+                "student_name VARCHAR(100) NOT NULL, "
+                "phone_detected BIT NOT NULL, "
+                "gaze VARCHAR(50) NOT NULL, "
+                "sleeping BIT NOT NULL) "
+                "END"
+            )
+            logger.info("✅ EngagementRecords table checked/created")
+        except pyodbc.Error as e:
+            logger.error(f"❌ Error creating EngagementRecords table: {e}")
+            return False
 
         # Create SystemSettings table
-        cursor.execute(
-            "IF OBJECT_ID('SystemSettings', 'U') IS NULL BEGIN "
-            "CREATE TABLE SystemSettings ("
-            "id INT PRIMARY KEY, "
-            "capture_active BIT NOT NULL DEFAULT 0) "
-            "INSERT INTO SystemSettings (id, capture_active) VALUES (1, 0) "
-            "END"
-        )
+        try:
+            cursor.execute(
+                "IF OBJECT_ID('dbo.SystemSettings', 'U') IS NULL BEGIN "
+                "CREATE TABLE SystemSettings ("
+                "id INT PRIMARY KEY, "
+                "capture_active BIT NOT NULL DEFAULT 0); "
+                "INSERT INTO SystemSettings (id, capture_active) VALUES (1, 0) "
+                "END"
+            )
+            logger.info("✅ SystemSettings table checked/created")
+        except pyodbc.Error as e:
+            logger.error(f"❌ Error creating SystemSettings table: {e}")
+            return False
+
+        # Verify tables were created
+        try:
+            cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
+            tables = [row[0] for row in cursor.fetchall()]
+            logger.info(f"📊 Available tables: {tables}")
+            
+            # Check if our tables are in the list
+            required_tables = ["Students", "AttendanceRecords", "EngagementRecords", "SystemSettings"]
+            for table in required_tables:
+                if table not in tables:
+                    logger.error(f"❌ Table {table} was not created successfully!")
+                    return False
+        except pyodbc.Error as e:
+            logger.error(f"❌ Error verifying tables: {e}")
+            return False
 
         conn.commit()
-        logger.info("✅ Tables created or already exist.")
+        logger.info("✅ All tables created or already exist.")
+        return True
     except pyodbc.Error as e:
         logger.error(f"❌ Error creating/updating tables: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in create_tables: {e}")
+        return False
     finally:
-        conn.close()
+        if 'conn' in locals() and conn:
+            conn.close()
 
 def get_enrolled_students():
     """Get all students with face embeddings for recognition"""

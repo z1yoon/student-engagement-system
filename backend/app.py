@@ -16,7 +16,8 @@ from db import (
     update_capture_status,
     get_analyze_results,
     get_capture_status,
-    student_exists
+    student_exists,
+    DB_CONNECTION_STRING
 )
 from utils import upload_to_blob
 from analyze import analyze_image, prepare_image_for_processing
@@ -107,8 +108,21 @@ async def generic_exception_handler(request, exc):
         content={"detail": str(exc)},
     )
 
-# Create tables on startup
-create_tables()
+# Create database tables at startup
+@app.on_event("startup")
+def startup_db_client():
+    logger.info("🚀 Starting up application...")
+    try:
+        # Do not log database connection string for security
+        logger.info("📝 Attempting database connection...")
+        
+        # Explicitly create tables
+        if not create_tables():
+            logger.error("❌ Failed to create necessary database tables. Application may not function correctly.")
+        else:
+            logger.info("✅ Database tables ready.")
+    except Exception as e:
+        logger.error(f"❌ Error during startup: {e}")
 
 @app.post("/api/enroll-student/")
 def enroll_student(payload: dict = Body(...)):
@@ -199,6 +213,8 @@ def analyze_endpoint(payload: dict = Body(...)):
     
     try:
         result = analyze_image(image_data)
+        # Store the latest analysis result for the /api/latest_analysis endpoint
+        app.latest_analysis_result = result
         return NumpyJSONResponse(content=convert_numpy_types(result))
     except Exception as e:
         logger.error(f"Error during image analysis: {e}")
@@ -211,6 +227,18 @@ def capture_status():
     """API endpoint for checking the current capture status"""
     status = get_capture_status()
     return convert_numpy_types(status)
+
+@app.get("/api/latest_analysis")
+def get_latest_analysis():
+    """API endpoint for getting the latest analyzed image with student status information"""
+    # Store the latest analysis result in memory
+    # This will be updated by the analyze_image function
+    global latest_analysis_result
+    
+    if not hasattr(app, 'latest_analysis_result') or app.latest_analysis_result is None:
+        return {"message": "No analysis available yet"}
+        
+    return convert_numpy_types(app.latest_analysis_result)
 
 if __name__ == "__main__":
     import uvicorn
