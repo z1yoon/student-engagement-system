@@ -203,7 +203,7 @@ function AnalyzeReport() {
                       </span>
                     </div>
                     
-                    {/* Status indicators */}
+                    {/* Status indicators with explanations */}
                     <div className="status-indicators">
                       {details.distracted > 0 && (
                         <div className="status-detail">
@@ -262,28 +262,6 @@ function AnalyzeReport() {
         ) : (
           <p className="no-data">No students found matching your criteria</p>
         )}
-      </div>
-
-      {/* Detection Criteria Information */}
-      <div className="card mt-4">
-        <h3>💡 Engagement Detection Criteria</h3>
-        <div className="info-box">
-          <h4>Phone Detection</h4>
-          <p>Uses Azure Computer Vision API to identify phones in the camera frame. When a phone is detected, it's associated with the closest student's face.</p>
-
-          <h4>Sleeping Detection</h4>
-          <p>A student is considered sleeping when <strong>either</strong> of these criteria are met for 3 consecutive frames:</p>
-          <ul>
-            <li>Eyes are closed (measured using eye aspect ratio)</li>
-            <li>Head is tilted significantly downward</li>
-          </ul>
-
-          <h4>Distraction Detection</h4>
-          <p>A student is marked as distracted when their head is turned significantly to the left or right for 3 consecutive frames.</p>
-          
-          <h4>Multiple Students</h4>
-          <p>When multiple students are in frame, each face is analyzed separately. Status indicators and engagement metrics are tracked individually.</p>
-        </div>
       </div>
     </div>
   );

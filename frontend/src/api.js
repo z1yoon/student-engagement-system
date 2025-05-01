@@ -26,3 +26,7 @@ export async function getAnalyzeResults(startDate = "", endDate = "") {
     })
     .then((res) => res.data);
 }
+
+export async function getLatestAnalysis() {
+  return axios.get(`${API_BASE}/latest_analysis`).then((res) => res.data);
+}

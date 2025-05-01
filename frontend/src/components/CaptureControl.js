@@ -3,8 +3,12 @@ import {
   startCapture,
   stopCapture,
   getCaptureStatus,
-  getAnalyzeResults
+  getAnalyzeResults,
+  getLatestAnalysis
 } from "../api";
+import axios from "axios";
+
+const API_BASE_URL = "http://localhost:8000";
 
 function CaptureControl() {
   const [isActive, setIsActive] = useState(false);
@@ -12,13 +16,14 @@ function CaptureControl() {
   const [captureStatus, setCaptureStatus] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState({ type: "", text: "" });
+  const [latestAnalysis, setLatestAnalysis] = useState(null);
 
   useEffect(() => {
     // Initial data fetch
     fetchImageAndStatus();
     
-    // Poll every ~minute to get the latest analyzed image
-    const imageInterval = setInterval(fetchImageAndStatus, 60000);
+    // Poll every 30 seconds to get the latest analyzed image and status
+    const imageInterval = setInterval(fetchImageAndStatus, 30000);
 
     return () => {
       clearInterval(imageInterval);
@@ -27,22 +32,39 @@ function CaptureControl() {
   
   const fetchImageAndStatus = async () => {
     try {
-      // Get latest analyzed image
-      const summary = await getAnalyzeResults();
-      if (summary.latest_annotated_image) {
-        setAnnotatedImage(summary.latest_annotated_image);
-      }
+      setLoading(true);
       
       // Get capture status
       const status = await getCaptureStatus();
       setCaptureStatus(status.active);
       setIsActive(status.active);
+      
+      // Get latest analyzed data
+      try {
+        // Get latest analyze results which might contain the latest annotated image
+        const summary = await getAnalyzeResults();
+        if (summary && summary.latest_annotated_image) {
+          setAnnotatedImage(summary.latest_annotated_image);
+        }
+        
+        // Get the latest analysis result with student status details
+        const analysis = await getLatestAnalysis();
+        if (analysis && analysis.annotated_image) {
+          setAnnotatedImage(analysis.annotated_image);
+          setLatestAnalysis(analysis);
+        }
+      } catch (error) {
+        console.error("Error fetching latest analysis:", error);
+      }
+      
+      setLoading(false);
     } catch (error) {
       console.error("Error fetching data:", error);
       setMessage({
         type: "error",
         text: "Failed to fetch the latest data. Please try again."
       });
+      setLoading(false);
     }
   };
 
@@ -55,6 +77,8 @@ function CaptureControl() {
         type: "success",
         text: "Capture started successfully."
       });
+      // Fetch latest status after starting capture
+      setTimeout(fetchImageAndStatus, 2000);
     } catch (err) {
       setMessage({
         type: "error",
@@ -133,13 +157,38 @@ function CaptureControl() {
               className="annotated-image"
             />
           </div>
+          
+          {latestAnalysis && (
+            <div className="analysis-details">
+              <h4>Detected Students</h4>
+              {latestAnalysis.recognized_students && latestAnalysis.recognized_students.length > 0 ? (
+                <ul className="student-status-list">
+                  {latestAnalysis.student_status && Object.entries(latestAnalysis.student_status).map(([name, status], idx) => (
+                    <li key={idx} className="student-status-item">
+                      <div className="student-name">{name}</div>
+                      <div className={`student-state ${status.is_sleeping ? 'sleeping' : (status.is_distracted ? 'distracted' : (status.using_phone ? 'phone' : 'focused'))}`}>
+                        {status.is_sleeping ? '😴 Sleeping' : 
+                          (status.is_distracted ? '👀 Distracted' : 
+                            (status.using_phone ? '📱 Phone' : '✅ Focused'))}
+                      </div>
+                      <div className="student-gaze">Gaze: {status.gaze}</div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No students detected in this frame.</p>
+              )}
+            </div>
+          )}
+          
           <div className="image-info">
             <p>This is the most recent image processed by the system.</p>
             <button 
               className="btn-secondary"
               onClick={fetchImageAndStatus}
+              disabled={loading}
             >
-              Refresh Data
+              {loading ? "Refreshing..." : "Refresh Data"}
             </button>
           </div>
         </div>
