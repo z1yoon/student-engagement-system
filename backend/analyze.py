@@ -3,318 +3,396 @@ import io
 import base64
 import logging
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-from azure.core.credentials import AzureKeyCredential
-from azure.ai.vision.imageanalysis import ImageAnalysisClient
-import insightface
+import cv2
+from PIL import Image
 from functools import lru_cache
-import threading
-
+import insightface
+from insightface.app import FaceAnalysis
+from numpy.linalg import norm
 from db import add_engagement_record, mark_attendance, get_enrolled_students
+import requests
+from collections import defaultdict
+
+# Student tracking dictionaries to maintain state across frames
+student_eye_closed_count = defaultdict(int)  # Tracks consecutive frames with closed eyes
+student_head_down_count = defaultdict(int)   # Tracks consecutive frames with head down
+student_head_turned_count = defaultdict(int)  # Tracks consecutive frames with head turned
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Azure Vision API credentials
-VISION_API_ENDPOINT = os.getenv("VISION_API_ENDPOINT", "")
-VISION_API_KEY = os.getenv("VISION_API_KEY", "")
-if not VISION_API_ENDPOINT or not VISION_API_KEY:
-    raise ValueError("Azure Vision API credentials are missing!")
-
-vision_client = ImageAnalysisClient(VISION_API_ENDPOINT, AzureKeyCredential(VISION_API_KEY))
-
-# Model directory for InsightFace
 MODEL_DIR = "/models"
-download_lock = threading.Lock()
 
-def ensure_models_exist():
-    """
-    Checks if the InsightFace models exist and downloads them if necessary.
-    """
-    expected_folder = os.path.join(MODEL_DIR, "models")
-    os.makedirs(expected_folder, exist_ok=True)
-    exists = os.path.exists(expected_folder) and len(os.listdir(expected_folder)) > 0
-    logger.info("models_exist check: expected_folder=%s exists=%s", expected_folder, exists)
-    if exists:
-        logger.info("✅ Models already exist in %s, skipping download.", MODEL_DIR)
-        return
-    with download_lock:
-        if os.path.exists(expected_folder) and len(os.listdir(expected_folder)) > 0:
-            logger.info("✅ Models already exist after acquiring lock, skipping download.")
-            return
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        logger.info("📥 Downloading InsightFace models into %s...", MODEL_DIR)
-        try:
-            temp_face_app = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR, download=True)
-            temp_face_app.prepare(ctx_id=-1, det_size=(640, 640))
-            logger.info("✅ Models downloaded and ready.")
-        except Exception as e:
-            logger.error(f"❌ Error downloading models: {e}")
-            raise
-
-@lru_cache(maxsize=1)
-def get_face_app():
-    """
-    Initializes and returns the face analysis app instance.
-    """
-    ensure_models_exist()
-    try:
-        face_app_instance = insightface.app.FaceAnalysis(name="buffalo_l", root=MODEL_DIR, download=False)
-        face_app_instance.prepare(ctx_id=-1, det_size=(640, 640))
-        logger.info("✅ FaceAnalysis initialized successfully.")
-        return face_app_instance
-    except Exception as e:
-        logger.error(f"❌ Error initializing FaceAnalysis: {e}")
-        raise
-
-def prepare_image_for_face_detection(image_bytes: bytes, max_size: int = 320):
-    """
-    Decodes image bytes, converts to RGB, and resizes the image if needed.
-    Returns the processed PIL image, its numpy array, and (orig_size, new_size).
-    """
+def prepare_image_for_processing(image_bytes: bytes):
+    """Convert image bytes to formats needed for processing"""
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        original_size = image.size  # (width, height) before resize
-        if max(image.size) > max_size:
-            image.thumbnail((max_size, max_size))
-            logger.info("Resized image from %s to %s", original_size, image.size)
-        resized_size = image.size
         image_np = np.array(image)
-        return image, image_np, original_size, resized_size
+        image_np_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        return image, image_np, image_np_bgr
     except Exception as e:
         logger.error("Error processing image: %s", e)
         raise
 
-def compute_head_pose(landmarks):
+def cosine_similarity(a, b):
+    """Calculate cosine similarity between two vectors"""
+    return np.dot(a, b) / (norm(a) * norm(b))
+
+@lru_cache(maxsize=1)
+def get_face_app():
+    """Initialize and return the face analysis app instance"""
     try:
-        left_eye = np.array(landmarks[0])
-        right_eye = np.array(landmarks[1])
-        nose = np.array(landmarks[2])
-        eye_center = (left_eye + right_eye) / 2.0
-        eye_distance = np.linalg.norm(left_eye - right_eye)
-        horizontal_disp = abs(nose[0] - eye_center[0])
-        norm_disp = horizontal_disp / eye_distance if eye_distance != 0 else 0
-        THRESHOLD = 0.15
-        return "distracted (talking)" if norm_disp > THRESHOLD else "focused"
+        providers = ['CPUExecutionProvider']
+        app = FaceAnalysis(
+            name="buffalo_s",
+            root=MODEL_DIR,
+            providers=providers,
+            download=True,
+            allowed_modules=['detection', 'recognition']
+        )
+        app.prepare(ctx_id=-1, det_size=(640, 640))
+        return app
     except Exception as e:
-        logger.error(f"Error computing head pose: {e}")
-        return "unknown"
+        logger.error(f"Error initializing FaceAnalysis: {e}")
+        raise
 
-def scale_bounding_boxes(faces_info, orig_size, resized_size):
-    """
-    Scales bounding box coordinates from resized image back to the original image size.
-    faces_info is a list of dicts with 'face_rectangle' keys.
-    """
-    (orig_w, orig_h) = orig_size
-    (res_w, res_h) = resized_size
+def compare_embeddings(embedding, enrolled_students, threshold=0.5):
+    """Compare face embedding with enrolled students using cosine similarity"""
+    best_name = "Unknown"
+    best_similarity = -1
+    
+    for student in enrolled_students:
+        student_name = student.get("name", "Unknown")
+        emb = student.get("face_embedding")
+        if emb is not None:
+            similarity = cosine_similarity(embedding, np.array(emb))
+            logger.debug(f"Similarity to {student_name}: {similarity:.4f}")
+            if similarity > best_similarity and similarity > threshold:
+                best_similarity = similarity
+                best_name = student["name"]
+    
+    if best_name != "Unknown":
+        logger.info(f"Recognized as {best_name} with similarity {best_similarity:.4f}")
+    
+    return best_name
 
-    if (orig_w, orig_h) == (res_w, res_h):
-        return faces_info
-
-    scale_x = orig_w / float(res_w)
-    scale_y = orig_h / float(res_h)
-
-    for face in faces_info:
-        rect = face["face_rectangle"]
-        rect["left"] = int(rect["left"] * scale_x)
-        rect["top"] = int(rect["top"] * scale_y)
-        rect["width"] = int(rect["width"] * scale_x)
-        rect["height"] = int(rect["height"] * scale_y)
-
-    return faces_info
-
-def draw_faces_on_image(image_bytes, faces_info, recognized_students):
-    """
-    Draws rectangles and labels on the original image bytes.
-    """
+def detect_phone_with_azure_vision(image_bytes):
+    """Detect phones in an image using Azure Computer Vision API"""
+    endpoint = os.getenv("VISION_API_ENDPOINT")
+    key = os.getenv("VISION_API_KEY")
+    
+    if not endpoint or not key:
+        logger.error("Azure Vision API credentials not found")
+        return False, {}
+    
+    analyze_url = f"{endpoint}/vision/v3.2/analyze"
+    headers = {
+        'Ocp-Apim-Subscription-Key': key,
+        'Content-Type': 'application/octet-stream'
+    }
+    params = {
+        'visualFeatures': 'Objects',
+        'language': 'en'
+    }
+    
     try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
-        for face in faces_info:
-            rect = face["face_rectangle"]
-            label = recognized_students.get(face["face_id"], "Unknown")
-            draw.rectangle(
-                [(rect["left"], rect["top"]),
-                 (rect["left"] + rect["width"], rect["top"] + rect["height"])],
-                outline="red",
-                width=2
-            )
-            draw.text((rect["left"], rect["top"] - 10), label, fill="red", font=font)
-        buffered = io.BytesIO()
-        image.save(buffered, format="JPEG")
-        return base64.b64encode(buffered.getvalue()).decode("utf-8")
+        response = requests.post(
+            analyze_url,
+            headers=headers,
+            params=params,
+            data=image_bytes
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        objects = result.get('objects', [])
+        
+        phone_related_terms = ['phone', 'cellphone', 'mobile', 'smartphone']
+        phone_detections = {}
+        
+        for obj in objects:
+            object_name = obj.get('object', '').lower()
+            if any(term in object_name for term in phone_related_terms):
+                confidence = obj.get('confidence', 0)
+                rectangle = obj.get('rectangle', {})
+                logger.info(f"Phone detected with confidence {confidence}")
+                
+                phone_detections[object_name] = {
+                    'confidence': confidence,
+                    'position': rectangle
+                }
+                
+        return len(phone_detections) > 0, phone_detections
+    
     except Exception as e:
-        logger.error(f"Error drawing faces on image: {e}")
-        return None
+        logger.error(f"Error calling Azure Vision API: {str(e)}")
+        return False, {}
 
-def normalize_embedding(embedding):
-    """
-    Normalizes an embedding to unit length.
-    """
-    emb = np.array(embedding)
-    norm = np.linalg.norm(emb)
-    if norm == 0:
-        return emb
-    return emb / norm
-
-def average_embeddings(embeddings):
-    """
-    Averages a list of normalized embeddings.
-    """
-    if not embeddings:
-        return None
-    avg_emb = np.mean(np.stack(embeddings), axis=0)
-    return normalize_embedding(avg_emb)
-
-def detect_faces_with_recognition_from_np(image_np):
-    """
-    Accepts a numpy array (from the processed image) and performs face detection.
-    Returns face info, recognized students, and a boolean indicating if any face was detected.
-    """
+def detect_eye_closure(face):
+    """Detect if a person's eyes are closed based on face landmarks"""
+    landmarks = getattr(face, 'landmark_2d_106', None)
+    if landmarks is None:
+        return False
+    
     try:
-        # Wrap face detection in a try/except in case InsightFace raises an error.
-        try:
-            faces = get_face_app().get(image_np)
-        except Exception as e:
-            logger.error("Error during face detection: %s", e)
-            return [], {}, False
-
-        results = []
-        recognized_students = {}
-        enrolled_students = get_enrolled_students()
-
-        # Process enrolled embeddings: assume each student has an averaged embedding.
-        enrolled_embeddings = [
-            normalize_embedding(student["face_embedding"])
-            for student in enrolled_students if student.get("face_embedding")
-        ]
-        enrolled_names = [
-            student["name"]
-            for student in enrolled_students if student.get("face_embedding")
-        ]
-
-        if not faces:
-            logger.warning("⚠️ No faces detected in the image (resized).")
-            return [], {}, False
-
-        for idx, face in enumerate(faces):
-            logger.info(f"Face {idx}: bbox={face.bbox}, landmark={face.landmark}")
-            face_id = f"face_{idx}"
-            bbox = face.bbox
-            head_pose = "unknown"
-            if face.landmark is not None:
-                head_pose = compute_head_pose(face.landmark.tolist())
-
-            face_info = {
-                "face_id": face_id,
-                "face_rectangle": {
-                    "left": int(bbox[0]),
-                    "top": int(bbox[1]),
-                    "width": int(bbox[2] - bbox[0]),
-                    "height": int(bbox[3] - bbox[1])
-                },
-                "gaze": head_pose,
-                "sleeping": False
-            }
-            results.append(face_info)
-
-            recognized = "Unknown"
-            embedding = getattr(face, "embedding", None)
-            if embedding is not None:
-                try:
-                    embedding = np.array(embedding)
-                    embedding = normalize_embedding(embedding)
-                except Exception as e:
-                    logger.error(f"Error converting embedding to numpy array: {e}")
-                    embedding = None
-                if embedding is not None and len(enrolled_embeddings) > 0:
-                    distances = [np.linalg.norm(embedding - emb) for emb in enrolled_embeddings]
-                    min_distance = min(distances) if distances else 9999
-                    logger.info(f"Face {idx} min_distance: {min_distance}")
-                    # For normalized embeddings, a typical threshold might be around 1.2 (adjust as necessary)
-                    if min_distance < 1.2:
-                        recognized = enrolled_names[np.argmin(distances)]
-            recognized_students[face_id] = recognized
-
-        return results, recognized_students, True
-    except Exception as e:
-        logger.error(f"Error detecting faces: {e}")
-        return [], {}, False
-
-def detect_objects(image_bytes: bytes):
-    """
-    Optional object detection with Azure Vision.
-    """
-    try:
-        with io.BytesIO(image_bytes) as stream:
-            analysis_result = vision_client.analyze(
-                image_data=stream.read(),
-                visual_features=["Objects"]
-            )
-        if not hasattr(analysis_result, "objects") or not analysis_result.objects:
-            logger.warning("⚠️ No objects detected or unexpected response format.")
-            return False
-        detected_objects = []
-        for obj in analysis_result.objects:
-            if isinstance(obj, str):
-                detected_objects.append(obj.lower())
-            elif hasattr(obj, "name"):
-                detected_objects.append(obj.name.lower())
-        phone_detected = "phone" in detected_objects
-        logger.info(f"✅ Phone detection result: {phone_detected}")
-        return phone_detected
-    except Exception as e:
-        logger.error(f"❌ Error detecting objects: {e}")
+        left_eye_height = np.linalg.norm(landmarks[37] - landmarks[41])
+        left_eye_width = np.linalg.norm(landmarks[36] - landmarks[39])
+        
+        right_eye_height = np.linalg.norm(landmarks[43] - landmarks[47])
+        right_eye_width = np.linalg.norm(landmarks[42] - landmarks[45])
+        
+        left_ear = left_eye_height / max(left_eye_width, 1e-5)
+        right_ear = right_eye_height / max(right_eye_width, 1e-5)
+        
+        ear = (left_ear + right_ear) / 2
+        ear_threshold = 0.2
+        
+        return ear < ear_threshold
+    except (IndexError, AttributeError):
+        logger.warning("Could not analyze eye landmarks")
         return False
 
+def detect_head_position(face):
+    """Detect head position (down, left, right) based on face pose"""
+    pose = getattr(face, 'pose', None)
+    if pose is None:
+        return 'center'
+    
+    try:
+        yaw = pose[0]  # left/right
+        pitch = pose[1]  # up/down
+        
+        yaw_threshold = 25  # degrees
+        pitch_threshold = 20  # degrees
+        
+        if pitch > pitch_threshold:
+            return 'down'
+        elif yaw < -yaw_threshold:
+            return 'left'
+        elif yaw > yaw_threshold:
+            return 'right'
+        else:
+            return 'center'
+    except (IndexError, AttributeError):
+        logger.warning("Could not analyze head pose")
+        return 'center'
+
+def draw_faces_with_status(image_bytes, faces, recognized_students, student_status):
+    """Draw faces with detailed status information on the image"""
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        for idx, face in enumerate(faces):
+            bbox = face.bbox.astype(np.int32)
+            student_name = recognized_students.get(idx, "Unknown")
+            
+            # Handle unknown faces
+            if student_name == "Unknown":
+                cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 0, 255), 2)
+                cv2.putText(img, "Unknown", (bbox[0], max(0, bbox[1] - 10)), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                continue
+            
+            status = student_status.get(student_name, {})
+            
+            # Determine box color and status text based on student's status
+            if status.get('is_sleeping', False):
+                color = (0, 0, 128)  # Dark red for sleeping
+                status_text = "SLEEPING"
+            elif status.get('is_distracted', False):
+                color = (0, 165, 255)  # Orange for distracted
+                status_text = "DISTRACTED"
+            elif status.get('using_phone', False):
+                color = (255, 0, 0)  # Blue for phone usage
+                status_text = "PHONE"
+            else:
+                color = (0, 255, 0)  # Green for focused
+                status_text = "FOCUSED"
+            
+            # Draw rectangle around face
+            cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+            
+            # Draw student name and status
+            y_pos = max(0, bbox[1] - 35)
+            cv2.putText(img, student_name, (bbox[0], y_pos), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            cv2.putText(img, status_text, (bbox[0], y_pos + 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+            # Add counter indicators when applicable
+            if student_eye_closed_count[student_name] > 0:
+                cv2.putText(img, f"Eyes closed: {student_eye_closed_count[student_name]}/3", 
+                          (bbox[0], bbox[3] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            if student_head_down_count[student_name] > 0:
+                cv2.putText(img, f"Head down: {student_head_down_count[student_name]}/3", 
+                          (bbox[0], bbox[3] + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                
+            if student_head_turned_count[student_name] > 0:
+                cv2.putText(img, f"Head turned: {student_head_turned_count[student_name]}/3", 
+                          (bbox[0], bbox[3] + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        
+        # Draw summary at the top of the image
+        recognized_count = len([n for n in recognized_students.values() if n != "Unknown"])
+        cv2.putText(img, f"Students detected: {recognized_count}", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Draw phone detection summary if applicable
+        phone_using_students = [name for name, status in student_status.items() 
+                              if status.get('using_phone', False)]
+        if phone_using_students:
+            cv2.putText(img, f"Phone detected: {', '.join(phone_using_students)}", 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
+        # Convert the image back to bytes for web display
+        is_success, buffer = cv2.imencode(".jpg", img)
+        if is_success:
+            return base64.b64encode(buffer).decode('utf-8')
+        else:
+            logger.error("Failed to encode annotated image")
+            return None
+    except Exception as e:
+        logger.error(f"Error drawing faces with status: {e}")
+        return None
+
 def analyze_image(image_data: str):
-    """
-    Decodes a Base64 image, processes it for face detection, performs face and object detection,
-    updates attendance and engagement records, and returns a summary.
-    If no face is detected, returns the processed image for inspection.
-    """
+    """Main function to analyze an image for student engagement"""
     try:
         logger.info("Starting image analysis...")
         raw_data = image_data.split(",")[1] if "," in image_data else image_data
         image_bytes = base64.b64decode(raw_data)
-
-        processed_image, image_np, orig_size, resized_size = prepare_image_for_face_detection(image_bytes, 320)
-
-        faces_info, recognized_students, face_detected = detect_faces_with_recognition_from_np(image_np)
-
-        faces_info = scale_bounding_boxes(faces_info, orig_size, resized_size)
-
-        phone_detected = detect_objects(image_bytes)
-
-        if not face_detected:
+        pil_image, image_np, image_np_bgr = prepare_image_for_processing(image_bytes)
+        
+        # Get face app and detect faces
+        face_app = get_face_app()
+        faces = face_app.get(image_np_bgr)
+        
+        # Handle case where no faces detected
+        if not faces:
             logger.info("No faces detected in the image.")
             buffered = io.BytesIO()
-            processed_image.save(buffered, format="JPEG")
-            resized_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+            pil_image.save(buffered, format="JPEG")
+            img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
             return {
                 "message": "No faces detected.",
                 "face_detected": False,
-                "annotated_image": resized_b64
+                "annotated_image": img_b64
             }
-
-        for face in faces_info:
-            student_name = recognized_students.get(face["face_id"], "Unknown")
-            if student_name != "Unknown":
-                mark_attendance(student_name, True, image_data)
-                logger.info(f"✅ Marked attendance for {student_name}")
-            add_engagement_record(student_name, phone_detected, face["gaze"], face["sleeping"])
-            logger.info(f"✅ Added engagement record for {student_name}")
-
-        annotated_image = draw_faces_on_image(image_bytes, faces_info, recognized_students)
+        
+        # Get enrolled students from database
+        enrolled_students = get_enrolled_students()
+        recognized_students = {}
+        student_status = {}
+        
+        # Detect phone usage using Azure Vision API
+        phone_detected, phone_detections = detect_phone_with_azure_vision(image_bytes)
+        
+        # Process each detected face
+        for idx, face in enumerate(faces):
+            embedding = face.embedding
+            name = compare_embeddings(embedding, enrolled_students)
+            recognized_students[idx] = name
+            
+            # Skip unknown faces for engagement tracking
+            if name == "Unknown":
+                continue
+                
+            # Mark attendance for recognized students
+            mark_attendance(name, True, image_data)
+            
+            # Get face bounding box for phone detection association
+            bbox = face.bbox.astype(np.int32)
+            face_center_x = (bbox[0] + bbox[2]) / 2
+            face_center_y = (bbox[1] + bbox[3]) / 2
+            
+            # Initialize status for this student
+            student_status[name] = {
+                'is_sleeping': False,
+                'is_distracted': False,
+                'using_phone': False,
+                'gaze': 'focused'
+            }
+            
+            # Detect eye closure and head position
+            eyes_closed = detect_eye_closure(face)
+            head_position = detect_head_position(face)
+            
+            # Update consecutive frame counters for this student
+            if eyes_closed:
+                student_eye_closed_count[name] += 1
+            else:
+                student_eye_closed_count[name] = 0
+                
+            if head_position == 'down':
+                student_head_down_count[name] += 1
+            else:
+                student_head_down_count[name] = 0
+                
+            if head_position in ['left', 'right']:
+                student_head_turned_count[name] += 1
+            else:
+                student_head_turned_count[name] = 0
+            
+            # Determine if student is sleeping (3 consecutive frames with eyes closed or head down)
+            is_sleeping = (student_eye_closed_count[name] >= 3 or 
+                          student_head_down_count[name] >= 3)
+            
+            # Determine if student is distracted (3 consecutive frames with head turned)
+            is_distracted = student_head_turned_count[name] >= 3
+            
+            # Determine if student is using a phone by checking proximity to detected phones
+            student_using_phone = False
+            if phone_detected:
+                for phone_info in phone_detections.values():
+                    phone_rect = phone_info['position']
+                    phone_center_x = phone_rect['x'] + (phone_rect['w'] / 2)
+                    phone_center_y = phone_rect['y'] + (phone_rect['h'] / 2)
+                    
+                    # Calculate distance between face and phone
+                    distance = np.sqrt((face_center_x - phone_center_x)**2 + 
+                                      (face_center_y - phone_center_y)**2)
+                    
+                    # If phone is close to this face, associate it with this student
+                    if distance < 300:  # Threshold for phone proximity
+                        student_using_phone = True
+                        break
+            
+            # Update student status
+            student_status[name]['is_sleeping'] = is_sleeping
+            student_status[name]['is_distracted'] = is_distracted
+            student_status[name]['using_phone'] = student_using_phone
+            
+            # Determine gaze status
+            if is_sleeping:
+                gaze_status = "sleeping"
+            elif is_distracted:
+                gaze_status = "distracted" 
+            elif head_position == 'down':
+                gaze_status = "looking down"
+            elif head_position in ['left', 'right']:
+                gaze_status = "looking away"
+            else:
+                gaze_status = "focused"
+                
+            student_status[name]['gaze'] = gaze_status
+            
+            # Record engagement with improved criteria
+            add_engagement_record(name, student_using_phone, gaze_status, is_sleeping)
+        
+        # Create annotated image with status information
+        annotated_image = draw_faces_with_status(image_bytes, faces, recognized_students, student_status)
+        
         return {
-            "message": "Analysis complete",
-            "faces": faces_info,
-            "recognized_students": recognized_students,
-            "phone_detected": phone_detected,
-            "annotated_image": annotated_image,
-            "face_detected": True
+            "message": "Image analyzed successfully.",
+            "face_detected": True,
+            "recognized_students": list(set(recognized_students.values())),
+            "student_status": student_status,
+            "annotated_image": annotated_image
         }
     except Exception as e:
         logger.error(f"Error during image analysis: {e}")
-        return {"error": "Failed to analyze image", "face_detected": False}
+        return {
+            "message": f"Error during analysis: {str(e)}",
+            "face_detected": False
+        }

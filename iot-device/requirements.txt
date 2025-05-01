@@ -1,0 +1,3 @@
+opencv-python
+azure-iot-device>=2.12.0
+python-dotenv 

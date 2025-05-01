@@ -3,90 +3,194 @@ import {
   startCapture,
   stopCapture,
   getCaptureStatus,
-  getAnalyzeResults
+  getAnalyzeResults,
+  getLatestAnalysis
 } from "../api";
+import axios from "axios";
+
+const API_BASE_URL = "http://localhost:8000";
 
 function CaptureControl() {
   const [isActive, setIsActive] = useState(false);
   const [annotatedImage, setAnnotatedImage] = useState("");
   const [captureStatus, setCaptureStatus] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState({ type: "", text: "" });
+  const [latestAnalysis, setLatestAnalysis] = useState(null);
 
   useEffect(() => {
-    // Poll every ~minute to get the latest analyzed image
-    const imageInterval = setInterval(async () => {
-      try {
-        const summary = await getAnalyzeResults();
-        if (summary.latest_annotated_image) {
-          setAnnotatedImage(summary.latest_annotated_image);
-        }
-      } catch (error) {
-        console.error("Error fetching analyzed results:", error);
-      }
-    }, 60000); // 1 minute
-
-    // Poll capture status every ~minute
-    const statusInterval = setInterval(async () => {
-      try {
-        const status = await getCaptureStatus();
-        setCaptureStatus(status.capture_active);
-      } catch (error) {
-        console.error("Error fetching capture status:", error);
-      }
-    }, 60000); // 1 minute
+    // Initial data fetch
+    fetchImageAndStatus();
+    
+    // Poll every 30 seconds to get the latest analyzed image and status
+    const imageInterval = setInterval(fetchImageAndStatus, 30000);
 
     return () => {
       clearInterval(imageInterval);
-      clearInterval(statusInterval);
     };
   }, []);
+  
+  const fetchImageAndStatus = async () => {
+    try {
+      setLoading(true);
+      
+      // Get capture status
+      const status = await getCaptureStatus();
+      setCaptureStatus(status.active);
+      setIsActive(status.active);
+      
+      // Get latest analyzed data
+      try {
+        // Get latest analyze results which might contain the latest annotated image
+        const summary = await getAnalyzeResults();
+        if (summary && summary.latest_annotated_image) {
+          setAnnotatedImage(summary.latest_annotated_image);
+        }
+        
+        // Get the latest analysis result with student status details
+        const analysis = await getLatestAnalysis();
+        if (analysis && analysis.annotated_image) {
+          setAnnotatedImage(analysis.annotated_image);
+          setLatestAnalysis(analysis);
+        }
+      } catch (error) {
+        console.error("Error fetching latest analysis:", error);
+      }
+      
+      setLoading(false);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+      setMessage({
+        type: "error",
+        text: "Failed to fetch the latest data. Please try again."
+      });
+      setLoading(false);
+    }
+  };
 
   const handleStart = async () => {
+    setLoading(true);
     try {
       const res = await startCapture();
       setIsActive(true);
-      alert(res.message);
+      setMessage({
+        type: "success",
+        text: "Capture started successfully."
+      });
+      // Fetch latest status after starting capture
+      setTimeout(fetchImageAndStatus, 2000);
     } catch (err) {
-      alert("Error starting capture: " + err.message);
+      setMessage({
+        type: "error",
+        text: `Error starting capture: ${err.message}`
+      });
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleStop = async () => {
+    setLoading(true);
     try {
       const res = await stopCapture();
       setIsActive(false);
-      alert(res.message);
+      setMessage({
+        type: "success",
+        text: "Capture stopped successfully."
+      });
     } catch (err) {
-      alert("Error stopping capture: " + err.message);
+      setMessage({
+        type: "error",
+        text: `Error stopping capture: ${err.message}`
+      });
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div>
-      <h2>Capture Control</h2>
-      <div>
-        <button onClick={handleStart} disabled={isActive}>
-          Start Capture
-        </button>
-        <button onClick={handleStop} disabled={!isActive}>
-          Stop Capture
-        </button>
+    <div className="capture-container">
+      <div className="card">
+        <h2>📸 Capture Control</h2>
+        
+        {message.text && (
+          <div className={`message ${message.type}`}>
+            {message.text}
+          </div>
+        )}
+        
+        <div className="status-indicator">
+          <div className={`status-dot ${captureStatus ? 'active' : 'inactive'}`}></div>
+          <p>Current Status: 
+            <span className={captureStatus ? 'text-success' : 'text-danger'}>
+              {captureStatus ? " Active" : " Inactive"}
+            </span>
+          </p>
+        </div>
+        
+        <div className="button-group">
+          <button
+            className="btn-success"
+            onClick={handleStart}
+            disabled={isActive || loading}
+          >
+            {loading && !isActive ? "Starting..." : "Start Capture"}
+          </button>
+          
+          <button
+            className="btn-danger"
+            onClick={handleStop}
+            disabled={!isActive || loading}
+          >
+            {loading && isActive ? "Stopping..." : "Stop Capture"}
+          </button>
+        </div>
       </div>
-      <div>
-        <p>Current Capture Status: {captureStatus ? "Active" : "Inactive"}</p>
-      </div>
+      
       {annotatedImage && (
-        <div>
+        <div className="card image-card">
           <h3>Latest Analyzed Image</h3>
-          <img
-            src={`data:image/jpeg;base64,${annotatedImage}`}
-            alt="Annotated Result"
-            style={{
-              width: "100%",
-              maxWidth: "600px",
-              border: "2px solid black",
-              borderRadius: "10px"
-            }}
-          />
+          <div className="annotated-image-container">
+            <img
+              src={`data:image/jpeg;base64,${annotatedImage}`}
+              alt="Annotated Result"
+              className="annotated-image"
+            />
+          </div>
+          
+          {latestAnalysis && (
+            <div className="analysis-details">
+              <h4>Detected Students</h4>
+              {latestAnalysis.recognized_students && latestAnalysis.recognized_students.length > 0 ? (
+                <ul className="student-status-list">
+                  {latestAnalysis.student_status && Object.entries(latestAnalysis.student_status).map(([name, status], idx) => (
+                    <li key={idx} className="student-status-item">
+                      <div className="student-name">{name}</div>
+                      <div className={`student-state ${status.is_sleeping ? 'sleeping' : (status.is_distracted ? 'distracted' : (status.using_phone ? 'phone' : 'focused'))}`}>
+                        {status.is_sleeping ? '😴 Sleeping' : 
+                          (status.is_distracted ? '👀 Distracted' : 
+                            (status.using_phone ? '📱 Phone' : '✅ Focused'))}
+                      </div>
+                      <div className="student-gaze">Gaze: {status.gaze}</div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No students detected in this frame.</p>
+              )}
+            </div>
+          )}
+          
+          <div className="image-info">
+            <p>This is the most recent image processed by the system.</p>
+            <button 
+              className="btn-secondary"
+              onClick={fetchImageAndStatus}
+              disabled={loading}
+            >
+              {loading ? "Refreshing..." : "Refresh Data"}
+            </button>
+          </div>
         </div>
       )}
     </div>

@@ -1,47 +1,61 @@
-FROM python:3.11
+FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
 
-# Install required system dependencies
+# Install system dependencies for ARM64/Apple Silicon
 RUN apt-get update && apt-get install -y \
-    cmake \
-    g++ \
-    make \
     build-essential \
+    g++ \
+    cmake \
     libopenblas-dev \
-    liblapack-dev \
-    libx11-dev \
-    libglib2.0-dev \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    unixodbc \
-    unixodbc-dev \
-    odbcinst \
-    odbc-postgresql \
-    libpq-dev \
+    uuid-dev \
+    libssl-dev \
     curl \
+    gnupg \
+    unixodbc-dev \
+    # MediaPipe and OpenCV dependencies \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    ffmpeg \
+    # InsightFace specific dependencies \
+    libgfortran5 \
+    libatlas-base-dev \
+    libhdf5-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ODBC Driver 18 for SQL Server
-RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
-    && curl -fsSL https://packages.microsoft.com/config/debian/11/prod.list | tee /etc/apt/sources.list.d/mssql-release.list \
+# Install Microsoft ODBC Driver - with fix for package conflicts
+RUN curl -sSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
+    && curl -sSL https://packages.microsoft.com/config/debian/11/prod.list > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18 \
-    && echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' >> ~/.bashrc \
-    && echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' >> ~/.zshrc \
-    && apt-get clean
+    # Remove any conflicting packages
+    && apt-get remove -y unixodbc-dev unixodbc-common libodbc2 libodbccr2 libodbcinst2 \
+    # Install Microsoft ODBC
+    && ACCEPT_EULA=Y apt-get install -y msodbcsql18 \
+    && apt-get install -y -f \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set environment variables for ODBC
+# Set ODBC environment variables
 ENV ODBCINI=/etc/odbc.ini
 ENV ODBCSYSINI=/etc
-ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu
 
-# Copy the project files
-COPY . /app
+# Copy requirements.txt
+COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+# Set environment variables to address OpenSSL deprecation warnings
+ENV PYTHONWARNINGS="ignore::DeprecationWarning:OpenSSL"
+ENV OPENSSL_CONF=/dev/null
 
+# Install Python dependencies using requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application
+COPY . .
+
+# Run the FastAPI application with uvicorn server
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

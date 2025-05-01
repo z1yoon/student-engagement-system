@@ -2,45 +2,30 @@ import React, { useState, useEffect } from "react";
 import "chart.js/auto";
 import { Bar } from "react-chartjs-2";
 import axios from "axios";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faEye } from "@fortawesome/free-solid-svg-icons";
-import Modal from "react-modal"; // Import a modal library
 
 const API_BASE_URL = "http://localhost:8000";
 
-// Modal styles (customize as needed)
-const customStyles = {
-  content: {
-    top: "50%",
-    left: "50%",
-    right: "auto",
-    bottom: "auto",
-    marginRight: "-50%",
-    transform: "translate(-50%, -50%)",
-    maxWidth: "90%",
-    maxHeight: "90%",
-    overflow: "auto",
-  },
-};
-
 function AnalyzeReport() {
+  // State variables
   const [reportData, setReportData] = useState({});
   const [chartData, setChartData] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
-  const [startDate, setStartDate] = useState(""); // Date Range Start
-  const [endDate, setEndDate] = useState(""); // Date Range End
-  const [modalIsOpen, setModalIsOpen] = useState(false); // Modal state
-  const [selectedImage, setSelectedImage] = useState(""); // Selected image URL
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [loading, setLoading] = useState(true);
   const studentsPerPage = 5;
 
+  // Fetch data on component mount and when date range changes
   useEffect(() => {
     fetchAnalyzeReport();
-    const interval = setInterval(fetchAnalyzeReport, 180000);
+    const interval = setInterval(fetchAnalyzeReport, 180000); // Refresh every 3 minutes
     return () => clearInterval(interval);
   }, [startDate, endDate]);
 
+  // Fetch analyze report data from API
   const fetchAnalyzeReport = () => {
+    setLoading(true);
     axios
       .get(`${API_BASE_URL}/api/analyze_results`, {
         params: { start_date: startDate, end_date: endDate },
@@ -48,199 +33,236 @@ function AnalyzeReport() {
       .then((response) => {
         setReportData(response.data);
         generateChartData(response.data);
+        setLoading(false);
       })
       .catch((error) => {
         console.error("Error fetching analyze report:", error);
+        setLoading(false);
       });
   };
 
+  // Generate chart data from API response
   const generateChartData = (data) => {
-    const labels = Object.keys(data);
-    const focusedCounts = labels.map((name) => data[name].focused);
-    const distractedCounts = labels.map((name) => data[name].distracted);
-    const phoneUsageCounts = labels.map((name) => data[name].phone_usage);
-    const sleepingCounts = labels.map((name) => data[name].sleeping);
+    // Filter out 'Latest Analyzed Image' entry
+    const filteredData = Object.fromEntries(
+      Object.entries(data).filter(([key]) => key !== 'Latest Analyzed Image')
+    );
+    
+    const labels = Object.keys(filteredData);
+    
+    // Extract engagement metrics for chart datasets
+    const datasets = [
+      { 
+        label: "Focused", 
+        data: labels.map((name) => filteredData[name].focused), 
+        backgroundColor: "rgba(34, 197, 94, 0.7)",
+        borderColor: "rgb(34, 197, 94)",
+        borderWidth: 1
+      },
+      { 
+        label: "Distracted", 
+        data: labels.map((name) => filteredData[name].distracted), 
+        backgroundColor: "rgba(239, 68, 68, 0.7)",
+        borderColor: "rgb(239, 68, 68)",
+        borderWidth: 1
+      },
+      { 
+        label: "Phone Usage", 
+        data: labels.map((name) => filteredData[name].phone_usage), 
+        backgroundColor: "rgba(59, 130, 246, 0.7)",
+        borderColor: "rgb(59, 130, 246)",
+        borderWidth: 1
+      },
+      { 
+        label: "Sleeping", 
+        data: labels.map((name) => filteredData[name].sleeping), 
+        backgroundColor: "rgba(124, 58, 237, 0.7)",
+        borderColor: "rgb(124, 58, 237)",
+        borderWidth: 1
+      }
+    ];
 
-    setChartData({
-      labels,
-      datasets: [
-        { label: "Focused", data: focusedCounts, backgroundColor: "green" },
-        { label: "Distracted", data: distractedCounts, backgroundColor: "red" },
-        { label: "Phone Usage", data: phoneUsageCounts, backgroundColor: "blue" },
-        { label: "Sleeping", data: sleepingCounts, backgroundColor: "purple" },
-      ],
-    });
+    setChartData({ labels, datasets });
   };
 
-  // Open modal with the selected image
-  const openModal = (imageUrl) => {
-    setSelectedImage(imageUrl);
-    setModalIsOpen(true);
-  };
-
-  // Close modal
-  const closeModal = () => {
-    setModalIsOpen(false);
-  };
-
-  // Filter students based on search input
+  // Filtered students based on search
   const filteredStudents = Object.entries(reportData).filter(([name]) =>
-    name.toLowerCase().includes(searchTerm.toLowerCase())
+    name.toLowerCase().includes(searchTerm.toLowerCase()) && 
+    name !== 'Latest Analyzed Image'
   );
 
   // Pagination logic
   const indexOfLastStudent = currentPage * studentsPerPage;
   const indexOfFirstStudent = indexOfLastStudent - studentsPerPage;
   const currentStudents = filteredStudents.slice(indexOfFirstStudent, indexOfLastStudent);
+  const totalPages = Math.ceil(filteredStudents.length / studentsPerPage);
+
+  // Chart configuration
+  const chartOptions = {
+    responsive: true,
+    plugins: {
+      legend: { position: 'top' },
+      title: {
+        display: true,
+        text: 'Student Engagement Summary'
+      }
+    },
+    scales: {
+      y: { beginAtZero: true }
+    }
+  };
 
   return (
-    <div style={{ padding: "20px" }}>
-      <h2>📊 Analyze Report</h2>
+    <div className="analyze-container">
+      {/* Report Card */}
+      <div className="card">
+        <h2>📊 Analyze Report</h2>
 
-      {/* Search Bar */}
-      <input
-        type="text"
-        placeholder="🔍 Search student..."
-        value={searchTerm}
-        onChange={(e) => setSearchTerm(e.target.value)}
-        style={{
-          padding: "8px",
-          width: "100%",
-          marginBottom: "15px",
-          border: "1px solid #ddd",
-          borderRadius: "5px",
-        }}
-      />
+        {/* Filters */}
+        <div className="filter-section">
+          {/* Search Bar */}
+          <div className="search-wrapper">
+            <input
+              type="text"
+              placeholder="🔍 Search student..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="search-input"
+            />
+          </div>
 
-      {/* Date Range Filter */}
-      <div style={{ display: "flex", gap: "10px", marginBottom: "15px" }}>
-        <input
-          type="date"
-          value={startDate}
-          onChange={(e) => setStartDate(e.target.value)}
-          style={{ padding: "8px", border: "1px solid #ddd", borderRadius: "5px" }}
-        />
-        <input
-          type="date"
-          value={endDate}
-          onChange={(e) => setEndDate(e.target.value)}
-          style={{ padding: "8px", border: "1px solid #ddd", borderRadius: "5px" }}
-        />
-      </div>
-
-      {/* Engagement Chart */}
-      <h3>📊 Engagement Chart</h3>
-      {chartData ? <Bar data={chartData} options={{ responsive: true }} /> : <p>Loading chart...</p>}
-
-      {/* Engagement & Attendance Details */}
-      <h3>📜 Student Details</h3>
-      <ul style={{ listStyle: "none", padding: 0 }}>
-        {currentStudents.map(([name, details], index) => (
-          <li
-            key={index}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "15px",
-              padding: "10px",
-              borderBottom: "1px solid #ddd",
-            }}
-          >
-            {/* Replace image with an icon */}
-            {details.image_url ? (
-              <div
-                style={{ cursor: "pointer" }}
-                onClick={() => openModal(details.image_url)}
-              >
-                <FontAwesomeIcon icon={faEye} size="2x" />
-              </div>
-            ) : (
-              <div style={{ width: 50, height: 50, backgroundColor: "#ccc", borderRadius: "50%" }} />
-            )}
-            <div style={{ flex: 1 }}>
-              <strong>{name}</strong>
-              <div>
-                <span>
-                  ✅ Focused: {details.focused}, ❌ Distracted: {details.distracted}, 📱 Phone Usage: {details.phone_usage}, 💤 Sleeping: {details.sleeping}
-                </span>
-              </div>
-              <div>
-                {/* Attendance Indicator */}
-                {details.attended ? (
-                  <span style={{ color: "green", fontWeight: "bold" }}>✔ Attended</span>
-                ) : (
-                  <span style={{ color: "red", fontWeight: "bold" }}>✘ Absent</span>
-                )}
-              </div>
+          {/* Date Range Filter */}
+          <div className="date-filter">
+            <div className="date-input-group">
+              <label>Start Date</label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="date-input"
+              />
             </div>
-          </li>
-        ))}
-      </ul>
+            <div className="date-input-group">
+              <label>End Date</label>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="date-input"
+              />
+            </div>
+            <button onClick={fetchAnalyzeReport} className="filter-button">
+              Apply Filters
+            </button>
+          </div>
+        </div>
 
-      {/* Pagination Controls */}
-      <div style={{ marginTop: "15px", textAlign: "center" }}>
-        <button
-          onClick={() => setCurrentPage(currentPage - 1)}
-          disabled={currentPage === 1}
-          style={{
-            marginRight: "10px",
-            padding: "5px 10px",
-            cursor: "pointer",
-            border: "1px solid #ddd",
-            borderRadius: "5px",
-            background: currentPage === 1 ? "#ccc" : "#007BFF",
-            color: "white",
-          }}
-        >
-          ◀ Prev
-        </button>
-        <span> Page {currentPage} </span>
-        <button
-          onClick={() => setCurrentPage(currentPage + 1)}
-          disabled={indexOfLastStudent >= filteredStudents.length}
-          style={{
-            marginLeft: "10px",
-            padding: "5px 10px",
-            cursor: "pointer",
-            border: "1px solid #ddd",
-            borderRadius: "5px",
-            background: indexOfLastStudent >= filteredStudents.length ? "#ccc" : "#007BFF",
-            color: "white",
-          }}
-        >
-          Next ▶
-        </button>
+        {/* Engagement Chart */}
+        <div className="chart-section">
+          <h3>📊 Engagement Chart</h3>
+          {loading ? (
+            <div className="loading-spinner">Loading...</div>
+          ) : chartData ? (
+            <Bar data={chartData} options={chartOptions} />
+          ) : (
+            <p className="no-data">No data available for the selected filters</p>
+          )}
+        </div>
       </div>
 
-      {/* Modal for displaying the image */}
-      <Modal
-        isOpen={modalIsOpen}
-        onRequestClose={closeModal}
-        style={customStyles}
-        contentLabel="Enrolled Student Image"
-      >
-        <div style={{ textAlign: "center" }}>
-          <img
-            src={selectedImage}
-            alt="Enrolled Student"
-            style={{ maxWidth: "100%", maxHeight: "80vh" }}
-          />
-          <button
-            onClick={closeModal}
-            style={{
-              marginTop: "10px",
-              padding: "5px 10px",
-              cursor: "pointer",
-              border: "1px solid #ddd",
-              borderRadius: "5px",
-              background: "#007BFF",
-              color: "white",
-            }}
-          >
-            Close
-          </button>
-        </div>
-      </Modal>
+      {/* Student Details Card */}
+      <div className="card mt-4">
+        <h3>📜 Student Details</h3>
+        {loading ? (
+          <div className="loading-spinner">Loading...</div>
+        ) : currentStudents.length > 0 ? (
+          <>
+            <ul className="student-list">
+              {currentStudents.map(([name, details], index) => (
+                <li key={index} className="student-item">
+                  <div className="student-info">
+                    <h4 className="student-name">{name}</h4>
+                    
+                    {/* Metrics */}
+                    <div className="metrics">
+                      <span className="metric">
+                        <span className="metric-label">Focused:</span>
+                        <span className="metric-value">{details.focused}</span>
+                      </span>
+                      <span className="metric">
+                        <span className="metric-label">Distracted:</span>
+                        <span className="metric-value">{details.distracted}</span>
+                      </span>
+                      <span className="metric">
+                        <span className="metric-label">Phone:</span>
+                        <span className="metric-value">{details.phone_usage}</span>
+                      </span>
+                      <span className="metric">
+                        <span className="metric-label">Sleeping:</span>
+                        <span className="metric-value">{details.sleeping}</span>
+                      </span>
+                    </div>
+                    
+                    {/* Status indicators with explanations */}
+                    <div className="status-indicators">
+                      {details.distracted > 0 && (
+                        <div className="status-detail">
+                          <span className="status-icon distracted">👀</span>
+                          <span className="status-text">Distracted when looking left/right for 3+ consecutive frames</span>
+                        </div>
+                      )}
+                      {details.sleeping > 0 && (
+                        <div className="status-detail">
+                          <span className="status-icon sleeping">😴</span>
+                          <span className="status-text">Sleeping detected when eyes closed or head down for 3+ consecutive frames</span>
+                        </div>
+                      )}
+                      {details.phone_usage > 0 && (
+                        <div className="status-detail">
+                          <span className="status-icon phone">📱</span>
+                          <span className="status-text">Phone usage detected via Azure Computer Vision</span>
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* Attendance status */}
+                    <div className="attendance">
+                      {details.attended ? (
+                        <span className="badge attended">✓ Attended</span>
+                      ) : (
+                        <span className="badge absent">✗ Absent</span>
+                      )}
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+
+            {/* Pagination */}
+            <div className="pagination">
+              <button
+                onClick={() => setCurrentPage(currentPage - 1)}
+                disabled={currentPage === 1}
+                className="page-button"
+              >
+                Previous
+              </button>
+              <span className="page-info">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                onClick={() => setCurrentPage(currentPage + 1)}
+                disabled={indexOfLastStudent >= filteredStudents.length}
+                className="page-button"
+              >
+                Next
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="no-data">No students found matching your criteria</p>
+        )}
+      </div>
     </div>
   );
 }
