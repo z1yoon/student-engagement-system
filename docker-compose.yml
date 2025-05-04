@@ -5,7 +5,6 @@ services:
     build: ./backend
     volumes:
       - ./backend:/app                # Mount backend code for live reload
-      - ./insightface_data:/models    # Mount model data for InsightFace
     ports:
       - "8000:8000"
     env_file:

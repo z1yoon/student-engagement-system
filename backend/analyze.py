@@ -15,6 +15,9 @@ from collections import defaultdict
 from config import VISION_API_ENDPOINT, VISION_API_KEY
 import math
 import traceback
+import torch
+from transformers import AutoFeatureExtractor, AutoModelForImageClassification
+import tempfile
 import mediapipe as mp
 
 # Student tracking dictionaries to maintain state across frames
@@ -24,9 +27,11 @@ student_head_turned_count = defaultdict(int)  # Tracks consecutive frames with h
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = "/models"
+# Define models directory path for Docker container
+MODEL_DIR = '/app/models'
+logger.info(f"Using models directory: {MODEL_DIR}")
 
-# Initialize MediaPipe Face Mesh
+# Initialize MediaPipe Face Mesh for head pose estimation
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
     max_num_faces=10,
@@ -34,6 +39,35 @@ face_mesh = mp_face_mesh.FaceMesh(
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
 )
+
+# Define key face landmark indices for head turn analysis
+# Left eye landmarks
+LEFT_EYE_LANDMARKS = [362, 385, 387, 263, 373, 380]
+# Right eye landmarks
+RIGHT_EYE_LANDMARKS = [33, 160, 158, 133, 153, 144]
+
+@lru_cache(maxsize=1)
+def get_eye_state_model():
+    """Initialize and return the MobileNetV2 eye classification model (manually downloaded)"""
+    try:
+        # Load from model directory in Docker container - assumes model is already downloaded
+        local_model_path = os.path.join(MODEL_DIR, "eye_state_model")
+        logger.info(f"Loading MobileNetV2 eye classification model from: {local_model_path}")
+        
+        feature_extractor = AutoFeatureExtractor.from_pretrained(local_model_path)
+        model = AutoModelForImageClassification.from_pretrained(local_model_path)
+        
+        # Get label mapping to verify model structure
+        label_mapping = model.config.id2label if hasattr(model.config, 'id2label') else None
+        if label_mapping:
+            logger.info(f"Model classes: {label_mapping}")
+        
+        logger.info("✅ Successfully loaded MobileNetV2 eye state model")
+        return feature_extractor, model
+    except Exception as e:
+        logger.error(f"Error initializing eye state model: {e}")
+        logger.error(traceback.format_exc())
+        raise
 
 def prepare_image_for_processing(image_bytes: bytes):
     """Convert image bytes to formats needed for processing"""
@@ -55,17 +89,23 @@ def get_face_app():
     """Initialize and return the face analysis app instance"""
     try:
         providers = ['CPUExecutionProvider']
+        # Use the models directory in Docker container for insightface
+        insightface_dir = os.path.join(MODEL_DIR, "insightface_data")
+        logger.info(f"Loading insightface models from: {insightface_dir}")
+        
         app = FaceAnalysis(
             name="buffalo_s",
-            root=MODEL_DIR,
+            root=insightface_dir,
             providers=providers,
             download=True,
             allowed_modules=['detection', 'recognition']
         )
         app.prepare(ctx_id=-1, det_size=(640, 640))
+        logger.info("✅ Successfully loaded insightface face analysis app")
         return app
     except Exception as e:
         logger.error(f"Error initializing FaceAnalysis: {e}")
+        logger.error(traceback.format_exc())
         raise
 
 def compare_embeddings(embedding, enrolled_students, threshold=0.5):
@@ -152,154 +192,164 @@ def detect_phone_with_azure_vision(image_bytes):
         logger.error(f"Error calling Azure Vision API: {str(e)}")
         return False, {}
 
-def detect_eye_closure(face_landmarks, width, height):
+def estimate_head_pose(face_landmarks, image_width, image_height):
     """
-    Detect if eyes are closed for a single face using individual landmark coordinates
-    Avoids any list operations that might cause errors
-    
-    Returns: True if eyes are closed, False otherwise
+    Estimate head pose (left, right, center) using MediaPipe face landmarks
+    Only detecting significant head turns, not slight movements
     """
     try:
-        # Define landmark indices for eyes
-        # Right eye - upper and lower points
-        right_eye_upper = 159  # Upper eyelid
-        right_eye_lower = 145  # Lower eyelid
+        # Get key facial landmarks for pose estimation
+        # Nose tip (landmark 4) for horizontal orientation
+        nose = face_landmarks.landmark[4]
+        nose_x = nose.x * image_width
         
-        # Left eye - upper and lower points
-        left_eye_upper = 386  # Upper eyelid
-        left_eye_lower = 374  # Lower eyelid
+        # Use multiple face contour points for more accurate face center
+        face_contour_indices = list(range(0, 17)) + [10, 152, 234, 454]
+        face_points_x = [face_landmarks.landmark[idx].x * image_width for idx in face_contour_indices]
         
-        # Get y coordinates for these landmarks
-        right_upper_y = face_landmarks.landmark[right_eye_upper].y * height
-        right_lower_y = face_landmarks.landmark[right_eye_lower].y * height
+        # Calculate face bounds and center
+        min_x = min(face_points_x)
+        max_x = max(face_points_x)
+        face_center_x = (min_x + max_x) / 2
+        face_width = max_x - min_x
         
-        left_upper_y = face_landmarks.landmark[left_eye_upper].y * height
-        left_lower_y = face_landmarks.landmark[left_eye_lower].y * height
+        # Calculate normalized offset of nose from face center
+        offset = (nose_x - face_center_x) / face_width
         
-        # Calculate vertical distances
-        right_eye_height = abs(right_upper_y - right_lower_y)
-        left_eye_height = abs(left_upper_y - left_lower_y)
-        
-        # Average eye height
-        avg_eye_height = (right_eye_height + left_eye_height) / 2
-        
-        # More sensitive threshold for detecting closed eyes (especially for Asian eyes)
-        # Lower values mean eyes more likely to be considered closed
-        CLOSURE_THRESHOLD = 2.2
-        
-        # Log actual values for debugging
-        logger.info(f"Eye height values - Right: {right_eye_height:.2f}, Left: {left_eye_height:.2f}, Avg: {avg_eye_height:.2f}")
-        
-        # Check both eyes individually and also the average
-        is_closed = avg_eye_height < CLOSURE_THRESHOLD
-        
-        if is_closed:
-            logger.info(f"Eyes detected as CLOSED - height: {avg_eye_height:.2f}")
+        # Use wide thresholds to only detect significant head turns
+        # Higher threshold of 0.1 to only catch significant turns
+        if offset < -0.1:
+            position = "left"
+        elif offset > 0.1:
+            position = "right"
         else:
-            logger.info(f"Eyes detected as OPEN - height: {avg_eye_height:.2f}")
+            position = "center"
             
-        # Return True if eyes are closed
-        return is_closed
+        logger.info(f"Head pose: {position} (offset: {offset:.4f})")
+        return position
         
     except Exception as e:
-        logger.error(f"Error in eye closure detection: {e}")
-        # Default to open if there's an error
-        return False
+        logger.error(f"Error estimating head pose: {e}")
+        return "center"  # Default to center on error
 
-def detect_eye_closure_with_mediapipe(image_np):
+def detect_closed_eyes_with_mobilenet(image_np, faces):
     """
-    Detect eye state (open or closed) using MediaPipe face mesh.
-    Simple, reliable implementation that avoids complex calculations.
-    Returns a dictionary mapping face index to eye state ('open', 'closed')
+    Detect eye state using only the MobileNetV2 eye classification model
+    
+    Args:
+        image_np: RGB numpy image array
+        faces: List of detected face objects with bbox information
+        
+    Returns:
+        Dictionary mapping face index to eye state ('open', 'closed')
     """
     results = {}
     
     try:
-        # Convert to RGB format for MediaPipe
-        image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
-        # Get dimensions
-        height, width = image_np.shape[:2]
+        # Suppress NNPACK warnings which occur when hardware doesn't support it
+        import warnings
+        warnings.filterwarnings("ignore", message="Could not initialize NNPACK")
         
-        # Process the image with MediaPipe
-        mp_results = face_mesh.process(image_rgb)
+        # Get the eye state model
+        feature_extractor, model = get_eye_state_model()
         
-        if not mp_results.multi_face_landmarks:
-            logger.debug("No facial landmarks found by MediaPipe for eye state")
+        if feature_extractor is None or model is None:
+            logger.error("Eye state model not available")
             return results
-            
-        # For each detected face
-        for face_idx, face_landmarks in enumerate(mp_results.multi_face_landmarks):
-            # Detect if eyes are closed
-            eyes_closed = detect_eye_closure(face_landmarks, width, height)
-            
-            # Store result for this face
-            results[face_idx] = "closed" if eyes_closed else "open"
+        
+        # Get class mapping for the model
+        id2label = model.config.id2label if hasattr(model.config, 'id2label') else {0: "closed", 1: "open"}
+        
+        # Process each face
+        for face_idx, face in enumerate(faces):
+            try:
+                # Get face bounding box
+                bbox = face.bbox.astype(np.int32)
+                
+                # Extract face region directly
+                x1, y1, x2, y2 = bbox
+                face_img = image_np[y1:y2, x1:x2]
+                
+                # Make sure we have a valid face image
+                if face_img.size == 0:
+                    logger.warning("Could not extract valid face region")
+                    results[face_idx] = "open"  # Default to open
+                    continue
+                
+                # Resize face to expected input size - MobileNetV2 typically uses 224x224
+                face_img = cv2.resize(face_img, (224, 224))
+                
+                # Convert to PIL Image for the feature extractor
+                face_pil = Image.fromarray(cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB))
+                
+                # Process with the model
+                inputs = feature_extractor(images=face_pil, return_tensors="pt")
+                
+                with torch.no_grad():
+                    output = model(**inputs)
+                
+                # Get predicted class and probabilities
+                predicted_class = output.logits.argmax().item()
+                probabilities = torch.nn.functional.softmax(output.logits, dim=-1)
+                confidence = probabilities[0][predicted_class].item()
+                
+                # For MichalMlodawski/open-closed-eye-classification-mobilev2 model:
+                # Class 0 is "closed", Class 1 is "open"
+                is_closed = (predicted_class == 0)  # Trust the model's prediction directly
+                predicted_label = id2label.get(predicted_class, "unknown")
+                
+                logger.info(f"Eye state detection for face {face_idx}: " +
+                           f"Model says '{predicted_label}' ({predicted_class}) with confidence {confidence:.4f}")
+                
+                results[face_idx] = "closed" if is_closed else "open"
+                
+            except Exception as e:
+                logger.error(f"Error processing face {face_idx} for eye state: {e}")
+                results[face_idx] = "open"  # Default to open on error
             
     except Exception as e:
-        logger.error(f"Error in eye detection: {e}")
+        logger.error(f"Error in eye detection: {str(e)}")
         logger.error(traceback.format_exc())
         
     return results
 
-def detect_head_position_with_mediapipe(image_np):
+def detect_head_position_with_mediapipe(image_np, faces):
     """
-    Simple and reliable head position detection
-    Returns a dictionary mapping face index to head position.
+    Detect head position using MediaPipe with adjusted thresholds
+    Returns a dictionary mapping face index to head position
     """
     results = {}
+    
     try:
         # Convert to RGB format for MediaPipe
         image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+        height, width = image_np.shape[:2]
+        
         # Process the image with MediaPipe
         mp_results = face_mesh.process(image_rgb)
         
         if not mp_results.multi_face_landmarks:
             logger.debug("No facial landmarks found by MediaPipe for head position")
+            # Default to center if MediaPipe doesn't detect faces
+            for face_idx, _ in enumerate(faces):
+                results[face_idx] = "center"
             return results
             
-        height, width = image_np.shape[:2]
-        
-        for face_idx, face_landmarks in enumerate(mp_results.multi_face_landmarks):
-            try:
-                # Default to "center"
-                position = "center"
-                
-                # Use nose tip (landmark 1) and face center to determine head position
-                nose_tip_x = face_landmarks.landmark[1].x * width
-                
-                # Find left and right bounds of face
-                min_x = width
-                max_x = 0
-                for landmark in face_landmarks.landmark:
-                    x = landmark.x * width
-                    if x < min_x:
-                        min_x = x
-                    if x > max_x:
-                        max_x = x
-                
-                # Calculate face center
-                face_center_x = (min_x + max_x) / 2
-                
-                # Determine head position based on nose tip relative to face center
-                offset = (nose_tip_x - face_center_x) / (max_x - min_x)  # Normalized offset
-                
-                # Use thresholds to determine position
-                if offset < -0.05:
-                    position = "left"
-                elif offset > 0.05:
-                    position = "right"
-                
-                logger.info(f"Head position detected: {position} (offset: {offset:.4f})")
+        # Associate MediaPipe detections with InsightFace detections
+        for face_idx, face in enumerate(faces):
+            if face_idx < len(mp_results.multi_face_landmarks):
+                mp_face_landmarks = mp_results.multi_face_landmarks[face_idx]
+                position = estimate_head_pose(mp_face_landmarks, width, height)
                 results[face_idx] = position
-                
-            except Exception as e:
-                logger.warning(f"Error analyzing head position: {str(e)}")
-                # Default to center if there's an error
-                results[face_idx] = "center"
+            else:
+                results[face_idx] = "center"  # Default if no matching MediaPipe detection
                 
     except Exception as e:
         logger.error(f"Error in head position detection: {str(e)}")
         logger.error(traceback.format_exc())
+        # Default to center if there's an error
+        for face_idx, _ in enumerate(faces):
+            results[face_idx] = "center"
             
     return results
 
@@ -436,11 +486,11 @@ def analyze_image(image_data: str):
         if phone_detected:
             logger.info(f"Phones detected: {list(phone_detections.keys())}")
         
-        # Process MediaPipe detections for eye closure and head position
-        logger.info("Detecting eye closure with MediaPipe...")
-        eye_states = detect_eye_closure_with_mediapipe(image_np)
-        logger.info("Detecting head position with MediaPipe...")
-        head_positions = detect_head_position_with_mediapipe(image_np)
+        # Process detections for eye closure and head position using the MobileNetV2 model
+        logger.info("Detecting eye closure with MobileNetV2 model...")
+        eye_states = detect_closed_eyes_with_mobilenet(image_np, faces)
+        logger.info("Detecting head position with MediaPipe thresholds adjusted for significant turns...")
+        head_positions = detect_head_position_with_mediapipe(image_np, faces)
         
         # Process each detected face
         for idx, face in enumerate(faces):
@@ -469,7 +519,7 @@ def analyze_image(image_data: str):
                 'gaze': 'focused'
             }
             
-            # Get MediaPipe detection results for this face
+            # Get detection results for this face
             eyes_closed = (eye_states.get(idx, "open") == "closed")
             head_position = head_positions.get(idx, "center")
             
@@ -493,11 +543,11 @@ def analyze_image(image_data: str):
                 student_head_turned_count[name] = 0
                 logger.info(f"Student {name} head position centered: head turned count reset to 0")
             
-            # SLEEPING DETECTION
-            # When eyes are closed in the current frame or for 3 consecutive frames
-            is_sleeping = eyes_closed or (student_eye_closed_count[name] >= 3)
+            # SLEEPING DETECTION - STRICTLY USING 3 CONSECUTIVE FRAMES RULE
+            # Only consider a student sleeping if eyes closed for 3 consecutive frames
+            is_sleeping = (student_eye_closed_count[name] >= 3)
             
-            # DISTRACTION DETECTION
+            # DISTRACTION DETECTION - USING 3 CONSECUTIVE FRAMES RULE
             is_distracted = (student_head_turned_count[name] >= 3)
             
             # Associate phone detection with this student if applicable
@@ -526,19 +576,17 @@ def analyze_image(image_data: str):
             # Determine the event type for database recording
             if is_sleeping:
                 event_type = "sleeping"
+                logger.info(f"Student {name} classified as SLEEPING - eyes closed for {student_eye_closed_count[name]} consecutive frames")
             elif is_using_phone:
                 event_type = "phone_usage"
+                logger.info(f"Student {name} classified as USING PHONE")
             elif is_distracted:
                 event_type = "distracted" 
+                logger.info(f"Student {name} classified as DISTRACTED - head turned for {student_head_turned_count[name]} consecutive frames")
             else:
                 event_type = "focused"
+                logger.info(f"Student {name} classified as FOCUSED")
             
-            # Log detection results
-            if is_sleeping:
-                logger.info(f"Student {name} classified as SLEEPING")
-            if is_distracted:
-                logger.info(f"Student {name} classified as DISTRACTED")
-                
             # Record engagement in the consolidated database table
             record_student_engagement(
                 student_name=name,

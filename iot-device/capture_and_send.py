@@ -40,7 +40,6 @@ def capture_loop():
     # Warm up the camera to avoid capturing a black frame
     logger.info("Warming up camera for 2 seconds to avoid black frames...")
     time.sleep(2)
-
     # Optionally discard a few initial frames
     for i in range(5):
         ret, frame = cap.read()
@@ -49,12 +48,13 @@ def capture_loop():
         time.sleep(0.1)
 
     last_sent_time = 0
+    first_frame = True
 
     try:
         while not stop_capture_event.is_set():
             current_time = time.time()
-            # Send a message only if the interval has passed
-            if current_time - last_sent_time >= CAPTURE_INTERVAL:
+              # Send first frame immediately, then respect interval
+            if first_frame or (current_time - last_sent_time >= CAPTURE_INTERVAL):
                 ret, frame = cap.read()
                 if ret and iot_client.connected:
                     # Encode frame to JPEG with specified quality
@@ -75,6 +75,7 @@ def capture_loop():
                         message_count += 1
                         logger.info(f"📷 ✅ Sent frame #{message_count} to IoT Hub at {time.ctime(current_time)}")
                         last_sent_time = current_time
+                        first_frame = False
                     else:
                         logger.error("❌ Failed to encode image.")
                 elif not ret:

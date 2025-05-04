@@ -1,9 +1,3 @@
-# InsightFace model data
-insightface_data/
-insightface_data/*
-models/
-models/*
-
 # Backend
 backend/__pycache__/
 backend/*.pyc
@@ -16,6 +10,8 @@ backend/logs/
 backend/*.log
 backend/db.sqlite3
 backend/.pytest_cache/
+backend/models/
+backend/models/*
 
 # Frontend
 frontend/node_modules/
