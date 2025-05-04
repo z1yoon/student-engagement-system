@@ -20,6 +20,13 @@ from transformers import AutoFeatureExtractor, AutoModelForImageClassification
 import tempfile
 import mediapipe as mp
 
+import os
+os.environ["PYTORCH_CPP_LOG_LEVEL"] = "ERROR"  # Suppress C++ level warnings
+os.environ["KMP_INIT_AT_FORK"] = "FALSE"       # Avoid fork-related errors
+os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"  # Reduce CUDA-related warnings
+
+import warnings
+warnings.filterwarnings("ignore", module="torch")  # Ignore PyTorch warnings
 # Student tracking dictionaries to maintain state across frames
 student_eye_closed_count = defaultdict(int)  # Tracks consecutive frames with closed eyes
 student_head_turned_count = defaultdict(int)  # Tracks consecutive frames with head turned
@@ -169,7 +176,7 @@ def detect_phone_with_azure_vision(image_bytes):
             logger.info(f"Detected object: {obj.get('object', '').lower()} with confidence {obj.get('confidence', 0)}")
         
         # ONLY detect exact phone objects
-        phone_terms = ['phone', 'cellphone', 'mobile', 'smartphone', 'iphone', 'android']
+        phone_terms = ['phone', 'cellphone', 'mobile', 'smartphone', 'iphone', 'android', 'ipod']
         phone_detections = {}
         
         for obj in objects:
@@ -234,7 +241,7 @@ def estimate_head_pose(face_landmarks, image_width, image_height):
 
 def detect_closed_eyes_with_mobilenet(image_np, faces):
     """
-    Detect eye state using only the MobileNetV2 eye classification model
+    Detect eye state using the MobileNetV2 eye classification model with high confidence threshold
     
     Args:
         image_np: RGB numpy image array
@@ -246,10 +253,6 @@ def detect_closed_eyes_with_mobilenet(image_np, faces):
     results = {}
     
     try:
-        # Suppress NNPACK warnings which occur when hardware doesn't support it
-        import warnings
-        warnings.filterwarnings("ignore", message="Could not initialize NNPACK")
-        
         # Get the eye state model
         feature_extractor, model = get_eye_state_model()
         
@@ -259,6 +262,9 @@ def detect_closed_eyes_with_mobilenet(image_np, faces):
         
         # Get class mapping for the model
         id2label = model.config.id2label if hasattr(model.config, 'id2label') else {0: "closed", 1: "open"}
+        
+        # Set high confidence threshold for closed eyes to reduce false positives
+        CLOSED_EYE_CONFIDENCE_THRESHOLD = 0.95  # 90% confidence required
         
         # Process each face
         for face_idx, face in enumerate(faces):
@@ -289,17 +295,27 @@ def detect_closed_eyes_with_mobilenet(image_np, faces):
                     output = model(**inputs)
                 
                 # Get predicted class and probabilities
-                predicted_class = output.logits.argmax().item()
-                probabilities = torch.nn.functional.softmax(output.logits, dim=-1)
-                confidence = probabilities[0][predicted_class].item()
+                logits = output.logits
+                probabilities = torch.nn.functional.softmax(logits, dim=-1)
                 
-                # For MichalMlodawski/open-closed-eye-classification-mobilev2 model:
-                # Class 0 is "closed", Class 1 is "open"
-                is_closed = (predicted_class == 0)  # Trust the model's prediction directly
+                # Get confidence for both classes
+                closed_confidence = probabilities[0][0].item()  # Class 0 is "closed"
+                open_confidence = probabilities[0][1].item()    # Class 1 is "open"
+                
+                # Only consider eyes closed if confidence exceeds our high threshold
+                if closed_confidence > CLOSED_EYE_CONFIDENCE_THRESHOLD:
+                    is_closed = True
+                    predicted_class = 0
+                else:
+                    is_closed = False
+                    predicted_class = 1
+                
                 predicted_label = id2label.get(predicted_class, "unknown")
                 
                 logger.info(f"Eye state detection for face {face_idx}: " +
-                           f"Model says '{predicted_label}' ({predicted_class}) with confidence {confidence:.4f}")
+                           f"Model prediction '{predicted_label}' with " +
+                           f"closed confidence {closed_confidence:.4f}, open confidence {open_confidence:.4f} " +
+                           f"(using 90% threshold for closed)")
                 
                 results[face_idx] = "closed" if is_closed else "open"
                 
