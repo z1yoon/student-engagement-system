@@ -9,19 +9,31 @@ from functools import lru_cache
 import insightface
 from insightface.app import FaceAnalysis
 from numpy.linalg import norm
-from db import add_engagement_record, mark_attendance, get_enrolled_students
+from db import mark_attendance, get_enrolled_students, record_student_engagement
 import requests
 from collections import defaultdict
+from config import VISION_API_ENDPOINT, VISION_API_KEY
+import math
+import traceback
+import mediapipe as mp
 
 # Student tracking dictionaries to maintain state across frames
 student_eye_closed_count = defaultdict(int)  # Tracks consecutive frames with closed eyes
-student_head_down_count = defaultdict(int)   # Tracks consecutive frames with head down
 student_head_turned_count = defaultdict(int)  # Tracks consecutive frames with head turned
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = "/models"
+
+# Initialize MediaPipe Face Mesh
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    max_num_faces=10,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
 def prepare_image_for_processing(image_bytes: bytes):
     """Convert image bytes to formats needed for processing"""
@@ -77,9 +89,12 @@ def compare_embeddings(embedding, enrolled_students, threshold=0.5):
     return best_name
 
 def detect_phone_with_azure_vision(image_bytes):
-    """Detect phones in an image using Azure Computer Vision API"""
-    endpoint = os.getenv("VISION_API_ENDPOINT")
-    key = os.getenv("VISION_API_KEY")
+    """
+    Detect phones in an image using Azure Computer Vision API
+    Only detects actual phones with exact matches
+    """
+    endpoint = VISION_API_ENDPOINT
+    key = VISION_API_KEY
     
     if not endpoint or not key:
         logger.error("Azure Vision API credentials not found")
@@ -96,6 +111,7 @@ def detect_phone_with_azure_vision(image_bytes):
     }
     
     try:
+        # Call Azure Vision API
         response = requests.post(
             analyze_url,
             headers=headers,
@@ -107,12 +123,18 @@ def detect_phone_with_azure_vision(image_bytes):
         result = response.json()
         objects = result.get('objects', [])
         
-        phone_related_terms = ['phone', 'cellphone', 'mobile', 'smartphone']
+        # Log all detected objects for debugging
+        logger.info(f"Azure Vision detected {len(objects)} objects")
+        for obj in objects:
+            logger.info(f"Detected object: {obj.get('object', '').lower()} with confidence {obj.get('confidence', 0)}")
+        
+        # ONLY detect exact phone objects
+        phone_terms = ['phone', 'cellphone', 'mobile', 'smartphone', 'iphone', 'android']
         phone_detections = {}
         
         for obj in objects:
             object_name = obj.get('object', '').lower()
-            if any(term in object_name for term in phone_related_terms):
+            if object_name in phone_terms:
                 confidence = obj.get('confidence', 0)
                 rectangle = obj.get('rectangle', {})
                 logger.info(f"Phone detected with confidence {confidence}")
@@ -121,67 +143,193 @@ def detect_phone_with_azure_vision(image_bytes):
                     'confidence': confidence,
                     'position': rectangle
                 }
-                
-        return len(phone_detections) > 0, phone_detections
+        
+        # Return True only if we found explicit phone objects
+        has_phones = len(phone_detections) > 0
+        return has_phones, phone_detections
     
     except Exception as e:
         logger.error(f"Error calling Azure Vision API: {str(e)}")
         return False, {}
 
-def detect_eye_closure(face):
-    """Detect if a person's eyes are closed based on face landmarks"""
-    landmarks = getattr(face, 'landmark_2d_106', None)
-    if landmarks is None:
-        return False
+def detect_eye_closure(face_landmarks, width, height):
+    """
+    Detect if eyes are closed for a single face using individual landmark coordinates
+    Avoids any list operations that might cause errors
     
+    Returns: True if eyes are closed, False otherwise
+    """
     try:
-        left_eye_height = np.linalg.norm(landmarks[37] - landmarks[41])
-        left_eye_width = np.linalg.norm(landmarks[36] - landmarks[39])
+        # Define landmark indices for eyes
+        # Right eye - upper and lower points
+        right_eye_upper = 159  # Upper eyelid
+        right_eye_lower = 145  # Lower eyelid
         
-        right_eye_height = np.linalg.norm(landmarks[43] - landmarks[47])
-        right_eye_width = np.linalg.norm(landmarks[42] - landmarks[45])
+        # Left eye - upper and lower points
+        left_eye_upper = 386  # Upper eyelid
+        left_eye_lower = 374  # Lower eyelid
         
-        left_ear = left_eye_height / max(left_eye_width, 1e-5)
-        right_ear = right_eye_height / max(right_eye_width, 1e-5)
+        # Get y coordinates for these landmarks
+        right_upper_y = face_landmarks.landmark[right_eye_upper].y * height
+        right_lower_y = face_landmarks.landmark[right_eye_lower].y * height
         
-        ear = (left_ear + right_ear) / 2
-        ear_threshold = 0.2
+        left_upper_y = face_landmarks.landmark[left_eye_upper].y * height
+        left_lower_y = face_landmarks.landmark[left_eye_lower].y * height
         
-        return ear < ear_threshold
-    except (IndexError, AttributeError):
-        logger.warning("Could not analyze eye landmarks")
-        return False
-
-def detect_head_position(face):
-    """Detect head position (down, left, right) based on face pose"""
-    pose = getattr(face, 'pose', None)
-    if pose is None:
-        return 'center'
-    
-    try:
-        yaw = pose[0]  # left/right
-        pitch = pose[1]  # up/down
+        # Calculate vertical distances
+        right_eye_height = abs(right_upper_y - right_lower_y)
+        left_eye_height = abs(left_upper_y - left_lower_y)
         
-        yaw_threshold = 25  # degrees
-        pitch_threshold = 20  # degrees
+        # Average eye height
+        avg_eye_height = (right_eye_height + left_eye_height) / 2
         
-        if pitch > pitch_threshold:
-            return 'down'
-        elif yaw < -yaw_threshold:
-            return 'left'
-        elif yaw > yaw_threshold:
-            return 'right'
+        # More sensitive threshold for detecting closed eyes (especially for Asian eyes)
+        # Lower values mean eyes more likely to be considered closed
+        CLOSURE_THRESHOLD = 2.2
+        
+        # Log actual values for debugging
+        logger.info(f"Eye height values - Right: {right_eye_height:.2f}, Left: {left_eye_height:.2f}, Avg: {avg_eye_height:.2f}")
+        
+        # Check both eyes individually and also the average
+        is_closed = avg_eye_height < CLOSURE_THRESHOLD
+        
+        if is_closed:
+            logger.info(f"Eyes detected as CLOSED - height: {avg_eye_height:.2f}")
         else:
-            return 'center'
-    except (IndexError, AttributeError):
-        logger.warning("Could not analyze head pose")
-        return 'center'
+            logger.info(f"Eyes detected as OPEN - height: {avg_eye_height:.2f}")
+            
+        # Return True if eyes are closed
+        return is_closed
+        
+    except Exception as e:
+        logger.error(f"Error in eye closure detection: {e}")
+        # Default to open if there's an error
+        return False
 
-def draw_faces_with_status(image_bytes, faces, recognized_students, student_status):
+def detect_eye_closure_with_mediapipe(image_np):
+    """
+    Detect eye state (open or closed) using MediaPipe face mesh.
+    Simple, reliable implementation that avoids complex calculations.
+    Returns a dictionary mapping face index to eye state ('open', 'closed')
+    """
+    results = {}
+    
+    try:
+        # Convert to RGB format for MediaPipe
+        image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+        # Get dimensions
+        height, width = image_np.shape[:2]
+        
+        # Process the image with MediaPipe
+        mp_results = face_mesh.process(image_rgb)
+        
+        if not mp_results.multi_face_landmarks:
+            logger.debug("No facial landmarks found by MediaPipe for eye state")
+            return results
+            
+        # For each detected face
+        for face_idx, face_landmarks in enumerate(mp_results.multi_face_landmarks):
+            # Detect if eyes are closed
+            eyes_closed = detect_eye_closure(face_landmarks, width, height)
+            
+            # Store result for this face
+            results[face_idx] = "closed" if eyes_closed else "open"
+            
+    except Exception as e:
+        logger.error(f"Error in eye detection: {e}")
+        logger.error(traceback.format_exc())
+        
+    return results
+
+def detect_head_position_with_mediapipe(image_np):
+    """
+    Simple and reliable head position detection
+    Returns a dictionary mapping face index to head position.
+    """
+    results = {}
+    try:
+        # Convert to RGB format for MediaPipe
+        image_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+        # Process the image with MediaPipe
+        mp_results = face_mesh.process(image_rgb)
+        
+        if not mp_results.multi_face_landmarks:
+            logger.debug("No facial landmarks found by MediaPipe for head position")
+            return results
+            
+        height, width = image_np.shape[:2]
+        
+        for face_idx, face_landmarks in enumerate(mp_results.multi_face_landmarks):
+            try:
+                # Default to "center"
+                position = "center"
+                
+                # Use nose tip (landmark 1) and face center to determine head position
+                nose_tip_x = face_landmarks.landmark[1].x * width
+                
+                # Find left and right bounds of face
+                min_x = width
+                max_x = 0
+                for landmark in face_landmarks.landmark:
+                    x = landmark.x * width
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+                
+                # Calculate face center
+                face_center_x = (min_x + max_x) / 2
+                
+                # Determine head position based on nose tip relative to face center
+                offset = (nose_tip_x - face_center_x) / (max_x - min_x)  # Normalized offset
+                
+                # Use thresholds to determine position
+                if offset < -0.05:
+                    position = "left"
+                elif offset > 0.05:
+                    position = "right"
+                
+                logger.info(f"Head position detected: {position} (offset: {offset:.4f})")
+                results[face_idx] = position
+                
+            except Exception as e:
+                logger.warning(f"Error analyzing head position: {str(e)}")
+                # Default to center if there's an error
+                results[face_idx] = "center"
+                
+    except Exception as e:
+        logger.error(f"Error in head position detection: {str(e)}")
+        logger.error(traceback.format_exc())
+            
+    return results
+
+def draw_faces_with_status(image_bytes, faces, recognized_students, student_status, phone_detections=None):
     """Draw faces with detailed status information on the image"""
     try:
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Draw phone bounding boxes if detected
+        if phone_detections:
+            for object_name, phone_info in phone_detections.items():
+                rect = phone_info['position']
+                confidence = phone_info['confidence']
+                
+                # Extract coordinates and dimensions of phone
+                x = int(rect.get('x', 0))
+                y = int(rect.get('y', 0))
+                w = int(rect.get('w', 0))
+                h = int(rect.get('h', 0))
+                
+                # Draw red rectangle around detected phone
+                cv2.rectangle(img, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                
+                # Add label with confidence score
+                label = f"{object_name}: {confidence:.2f}"
+                cv2.putText(img, label, (x, y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                
+                logger.info(f"Drawing bounding box for {object_name} at position x={x}, y={y}, w={w}, h={h}")
         
         for idx, face in enumerate(faces):
             bbox = face.bbox.astype(np.int32)
@@ -224,14 +372,10 @@ def draw_faces_with_status(image_bytes, faces, recognized_students, student_stat
             if student_eye_closed_count[student_name] > 0:
                 cv2.putText(img, f"Eyes closed: {student_eye_closed_count[student_name]}/3", 
                           (bbox[0], bbox[3] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            
-            if student_head_down_count[student_name] > 0:
-                cv2.putText(img, f"Head down: {student_head_down_count[student_name]}/3", 
-                          (bbox[0], bbox[3] + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                 
             if student_head_turned_count[student_name] > 0:
                 cv2.putText(img, f"Head turned: {student_head_turned_count[student_name]}/3", 
-                          (bbox[0], bbox[3] + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                          (bbox[0], bbox[3] + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
         # Draw summary at the top of the image
         recognized_count = len([n for n in recognized_students.values() if n != "Unknown"])
@@ -264,7 +408,7 @@ def analyze_image(image_data: str):
         image_bytes = base64.b64decode(raw_data)
         pil_image, image_np, image_np_bgr = prepare_image_for_processing(image_bytes)
         
-        # Get face app and detect faces
+        # Get face app and detect faces - USING INSIGHTFACE FOR FACE DETECTION
         face_app = get_face_app()
         faces = face_app.get(image_np_bgr)
         
@@ -285,11 +429,22 @@ def analyze_image(image_data: str):
         recognized_students = {}
         student_status = {}
         
-        # Detect phone usage using Azure Vision API
+        # Detect phone usage using Azure Vision API - but only trust explicit phone detections
+        logger.info("Detecting phones in the image...")
         phone_detected, phone_detections = detect_phone_with_azure_vision(image_bytes)
+        logger.info(f"Phone detection result: {phone_detected}")
+        if phone_detected:
+            logger.info(f"Phones detected: {list(phone_detections.keys())}")
+        
+        # Process MediaPipe detections for eye closure and head position
+        logger.info("Detecting eye closure with MediaPipe...")
+        eye_states = detect_eye_closure_with_mediapipe(image_np)
+        logger.info("Detecting head position with MediaPipe...")
+        head_positions = detect_head_position_with_mediapipe(image_np)
         
         # Process each detected face
         for idx, face in enumerate(faces):
+            # USING INSIGHTFACE FOR RECOGNITION
             embedding = face.embedding
             name = compare_embeddings(embedding, enrolled_students)
             recognized_students[idx] = name
@@ -314,85 +469,115 @@ def analyze_image(image_data: str):
                 'gaze': 'focused'
             }
             
-            # Detect eye closure and head position
-            eyes_closed = detect_eye_closure(face)
-            head_position = detect_head_position(face)
+            # Get MediaPipe detection results for this face
+            eyes_closed = (eye_states.get(idx, "open") == "closed")
+            head_position = head_positions.get(idx, "center")
+            
+            # Log current state before updating counters
+            logger.info(f"Student {name} - Current state - Eyes closed: {eyes_closed}, Head position: {head_position}")
+            logger.info(f"Student {name} - Current counters - Eyes closed: {student_eye_closed_count[name]}/3, Head turned: {student_head_turned_count[name]}/3")
             
             # Update consecutive frame counters for this student
             if eyes_closed:
                 student_eye_closed_count[name] += 1
+                logger.info(f"Student {name} has closed eyes: frame count now {student_eye_closed_count[name]}/3")
             else:
                 student_eye_closed_count[name] = 0
+                logger.info(f"Student {name} has open eyes: frame count reset to 0")
                 
-            if head_position == 'down':
-                student_head_down_count[name] += 1
-            else:
-                student_head_down_count[name] = 0
-                
+            # Only track left/right head positions for distraction detection
             if head_position in ['left', 'right']:
                 student_head_turned_count[name] += 1
+                logger.info(f"Student {name} head turned {head_position}: frame count now {student_head_turned_count[name]}/3")
             else:
                 student_head_turned_count[name] = 0
+                logger.info(f"Student {name} head position centered: head turned count reset to 0")
             
-            # Determine if student is sleeping (3 consecutive frames with eyes closed or head down)
-            is_sleeping = (student_eye_closed_count[name] >= 3 or 
-                          student_head_down_count[name] >= 3)
+            # SLEEPING DETECTION
+            # When eyes are closed in the current frame or for 3 consecutive frames
+            is_sleeping = eyes_closed or (student_eye_closed_count[name] >= 3)
             
-            # Determine if student is distracted (3 consecutive frames with head turned)
-            is_distracted = student_head_turned_count[name] >= 3
+            # DISTRACTION DETECTION
+            is_distracted = (student_head_turned_count[name] >= 3)
             
-            # Determine if student is using a phone by checking proximity to detected phones
-            student_using_phone = False
-            if phone_detected:
-                for phone_info in phone_detections.values():
-                    phone_rect = phone_info['position']
-                    phone_center_x = phone_rect['x'] + (phone_rect['w'] / 2)
-                    phone_center_y = phone_rect['y'] + (phone_rect['h'] / 2)
+            # Associate phone detection with this student if applicable
+            is_using_phone = False
+            if phone_detected and phone_detections:
+                for object_name, phone_info in phone_detections.items():
+                    rect = phone_info['position']
+                    phone_center_x = (rect['x'] + rect['w']/2)
+                    phone_center_y = (rect['y'] + rect['h']/2)
                     
-                    # Calculate distance between face and phone
-                    distance = np.sqrt((face_center_x - phone_center_x)**2 + 
-                                      (face_center_y - phone_center_y)**2)
+                    # Strict criteria for phone-face association
+                    distance = math.sqrt((face_center_x - phone_center_x)**2 + 
+                                         (face_center_y - phone_center_y)**2)
                     
-                    # If phone is close to this face, associate it with this student
-                    if distance < 300:  # Threshold for phone proximity
-                        student_using_phone = True
+                    if distance < 200:
+                        is_using_phone = True
+                        logger.info(f"Student {name} detected using phone - distance: {distance:.2f}px")
                         break
             
-            # Update student status
+            # Update the student status
             student_status[name]['is_sleeping'] = is_sleeping
             student_status[name]['is_distracted'] = is_distracted
-            student_status[name]['using_phone'] = student_using_phone
-            
-            # Determine gaze status
-            if is_sleeping:
-                gaze_status = "sleeping"
-            elif is_distracted:
-                gaze_status = "distracted" 
-            elif head_position == 'down':
-                gaze_status = "looking down"
-            elif head_position in ['left', 'right']:
-                gaze_status = "looking away"
-            else:
-                gaze_status = "focused"
+            student_status[name]['using_phone'] = is_using_phone
+            student_status[name]['gaze'] = 'focused' if not is_distracted else 'distracted'
                 
-            student_status[name]['gaze'] = gaze_status
+            # Determine the event type for database recording
+            if is_sleeping:
+                event_type = "sleeping"
+            elif is_using_phone:
+                event_type = "phone_usage"
+            elif is_distracted:
+                event_type = "distracted" 
+            else:
+                event_type = "focused"
             
-            # Record engagement with improved criteria
-            add_engagement_record(name, student_using_phone, gaze_status, is_sleeping)
+            # Log detection results
+            if is_sleeping:
+                logger.info(f"Student {name} classified as SLEEPING")
+            if is_distracted:
+                logger.info(f"Student {name} classified as DISTRACTED")
+                
+            # Record engagement in the consolidated database table
+            record_student_engagement(
+                student_name=name,
+                event_type=event_type,
+                confidence=0.85,
+                frame_data=image_data
+            )
+            
+            # Log the final engagement classification
+            logger.info(f"Final engagement status for {name}: " + 
+                      f"sleeping={is_sleeping}, " + 
+                      f"distracted={is_distracted}, " + 
+                      f"using_phone={is_using_phone}")
         
-        # Create annotated image with status information
-        annotated_image = draw_faces_with_status(image_bytes, faces, recognized_students, student_status)
+        # Create annotated image with detection results
+        annotated_image = draw_faces_with_status(
+            image_bytes, 
+            faces, 
+            recognized_students, 
+            student_status,
+            phone_detections if phone_detected else None
+        )
         
+        # Use the returned base64 string directly
+        img_b64 = annotated_image
+        
+        logger.info("Image analysis completed successfully.")
         return {
-            "message": "Image analyzed successfully.",
+            "message": "Analysis complete",
             "face_detected": True,
-            "recognized_students": list(set(recognized_students.values())),
+            "recognized_students": [name for name in recognized_students.values() if name != "Unknown"],
             "student_status": student_status,
-            "annotated_image": annotated_image
+            "annotated_image": img_b64
         }
+        
     except Exception as e:
-        logger.error(f"Error during image analysis: {e}")
+        logger.error(f"Error in image analysis: {str(e)}")
+        logger.error(traceback.format_exc())
         return {
-            "message": f"Error during analysis: {str(e)}",
+            "error": str(e),
             "face_detected": False
         }

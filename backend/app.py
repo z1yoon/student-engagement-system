@@ -1,6 +1,4 @@
-import os
 import base64
-import io
 import logging
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Body
@@ -17,17 +15,14 @@ from db import (
     get_analyze_results,
     get_capture_status,
     student_exists,
-    DB_CONNECTION_STRING
+    check_similar_face_exists
 )
 from utils import upload_to_blob
 from analyze import analyze_image, prepare_image_for_processing
+from config import IOT_HUB_CONNECTION_STRING, DEVICE_ID
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Constants
-IOT_HUB_CONNECTION_STRING = os.getenv("IOT_HUB_CONNECTION_STRING", "")
-DEVICE_ID = os.getenv("DEVICE_ID", "Mac01")
 
 class NumpyJSONResponse(JSONResponse):
     """Custom JSON response class that handles NumPy data types"""
@@ -72,6 +67,10 @@ def convert_numpy_types(obj):
 
 def invoke_direct_method(method_name, payload=None):
     """Invoke a direct method on the IoT device"""
+    if not IOT_HUB_CONNECTION_STRING:
+        logger.error("❌ IOT_HUB_CONNECTION_STRING not configured")
+        raise HTTPException(status_code=500, detail="IoT Hub not configured")
+        
     registry_manager = IoTHubRegistryManager(IOT_HUB_CONNECTION_STRING)
     method_request = CloudToDeviceMethod(method_name=method_name, payload=payload or {})
     try:
@@ -113,7 +112,6 @@ async def generic_exception_handler(request, exc):
 def startup_db_client():
     logger.info("🚀 Starting up application...")
     try:
-        # Do not log database connection string for security
         logger.info("📝 Attempting database connection...")
         
         # Explicitly create tables
@@ -161,10 +159,29 @@ def enroll_student(payload: dict = Body(...)):
                 # Print the face embedding (first 10 values for brevity)
                 embedding_sample = face_embedding[:10]
                 logger.info(f"Face embedding sample (first 10 values): {embedding_sample}")
+                
+                # Check for similar existing faces (de-duplication)
+                has_similar_face, similar_students = check_similar_face_exists(face_embedding, similarity_threshold=0.80)
+                
+                if has_similar_face:
+                    # Format the similar students for the error message
+                    similar_faces_info = []
+                    for name, similarity in similar_students:
+                        similarity_percent = round(similarity * 100, 2)
+                        similar_faces_info.append(f"{name} ({similarity_percent}% similar)")
+                    
+                    similar_faces_str = ", ".join(similar_faces_info)
+                    raise HTTPException(
+                        status_code=409, 
+                        detail=f"This face appears to be already enrolled as: {similar_faces_str}. Cannot enroll the same person with different names."
+                    )
             else:
                 logger.warning("⚠️ Face detected but no embedding computed")
         else:
             logger.warning("⚠️ No face detected during enrollment")
+    except HTTPException:
+        # Re-raise HTTPExceptions (like our duplicate face error)
+        raise
     except Exception as e:
         logger.error(f"Error during image processing: {e}")
         face_embedding = None
@@ -226,15 +243,12 @@ def analyze_endpoint(payload: dict = Body(...)):
 def capture_status():
     """API endpoint for checking the current capture status"""
     status = get_capture_status()
-    return convert_numpy_types(status)
+    # No need to convert simple Python types
+    return status
 
 @app.get("/api/latest_analysis")
 def get_latest_analysis():
     """API endpoint for getting the latest analyzed image with student status information"""
-    # Store the latest analysis result in memory
-    # This will be updated by the analyze_image function
-    global latest_analysis_result
-    
     if not hasattr(app, 'latest_analysis_result') or app.latest_analysis_result is None:
         return {"message": "No analysis available yet"}
         
