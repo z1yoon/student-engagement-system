@@ -36,7 +36,7 @@ from db import mark_attendance, get_enrolled_students, record_student_engagement
 
 # Student tracking dictionaries to maintain state across frames
 student_eye_closed_count = defaultdict(int)  # Tracks consecutive frames with closed eyes
-student_head_turned_count = defaultdict(int)  # Tracks consecutive frames with head turned
+student_head_turned_count = defaultdict(int)  # Reintroduce tracking consecutive frames with head turned
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -247,11 +247,11 @@ def estimate_head_pose(face_landmarks, image_width, image_height):
         # Calculate normalized offset of nose from face center
         offset = (nose_x - face_center_x) / face_width
         
-        # Use wide thresholds to only detect significant head turns
-        # Higher threshold of 0.1 to only catch significant turns
-        if offset < -0.1:
+        # Use stricter thresholds to only detect very significant head turns
+        # Increased from 0.1 to 0.3 (30% offset from center) for more restrictive detection
+        if offset < -0.3:
             position = "left"
-        elif offset > 0.1:
+        elif offset > 0.3:
             position = "right"
         else:
             position = "center"
@@ -438,11 +438,12 @@ def draw_faces_with_status(image_bytes, faces, recognized_students, student_stat
             if status.get('is_sleeping', False):
                 color = (0, 0, 128)  # Dark red for sleeping
                 status_text = "SLEEPING"
-            elif status.get('is_distracted', False):
-                color = (0, 165, 255)  # Orange for distracted
             elif status.get('using_phone', False):
                 color = (255, 0, 0)  # Blue for phone usage
-                status_text = "PHONE"
+                status_text = "USING_PHONE"
+            elif status.get('is_distracted', False):
+                color = (0, 165, 255)  # Orange for distracted
+                status_text = "DISTRACTED"
             else:
                 color = (0, 255, 0)  # Green for focused
                 status_text = "FOCUSED"
@@ -462,6 +463,7 @@ def draw_faces_with_status(image_bytes, faces, recognized_students, student_stat
                 cv2.putText(img, f"Eyes closed: {student_eye_closed_count[student_name]}/3", 
                           (bbox[0], bbox[3] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                 
+            # Reintroduce head turn count display
             if student_head_turned_count[student_name] > 0:
                 cv2.putText(img, f"Head turned: {student_head_turned_count[student_name]}/3", 
                           (bbox[0], bbox[3] + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
@@ -518,16 +520,14 @@ def analyze_image(image_data: str):
         recognized_students = {}
         student_status = {}
         
-        # Detect phone usage using YOLOv8 instead of Azure Vision API
+        # Detect phone usage using YOLOv8 first - PRIORITY DETECTION
         logger.info("Detecting phones with YOLOv8...")
         phone_detected, phone_detections = detect_phone_with_yolo(image_np)
         logger.info(f"Phone detection result: {phone_detected}")
         if phone_detected:
             logger.info(f"Phones detected: {len(phone_detections)}")
         
-        # Process detections for eye closure and head position
-        logger.info("Detecting eye closure with MobileNetV2 model...")
-        eye_states = detect_closed_eyes_with_mobilenet(image_np, faces)
+        # Process detections for head position - always needed for distraction detection
         logger.info("Detecting head position with MediaPipe...")
         head_positions = detect_head_position_with_mediapipe(image_np, faces)
         
@@ -555,41 +555,13 @@ def analyze_image(image_data: str):
                 'is_sleeping': False,
                 'is_distracted': False,
                 'using_phone': False,
-                'gaze': 'focused'
+                'head_position': 'center'
             }
             
-            # Get detection results for this face
-            eyes_closed = (eye_states.get(idx, "open") == "closed")
+            # Get head position for this face
             head_position = head_positions.get(idx, "center")
             
-            # Log current state before updating counters
-            logger.info(f"Student {name} - Current state - Eyes closed: {eyes_closed}, Head position: {head_position}")
-            logger.info(f"Student {name} - Current counters - Eyes closed: {student_eye_closed_count[name]}/3, Head turned: {student_head_turned_count[name]}/3")
-            
-            # Update consecutive frame counters for this student
-            if eyes_closed:
-                student_eye_closed_count[name] += 1
-                logger.info(f"Student {name} has closed eyes: frame count now {student_eye_closed_count[name]}/3")
-            else:
-                student_eye_closed_count[name] = 0
-                logger.info(f"Student {name} has open eyes: frame count reset to 0")
-                
-            # Only track left/right head positions for distraction detection
-            if head_position in ['left', 'right']:
-                student_head_turned_count[name] += 1
-                logger.info(f"Student {name} head turned {head_position}: frame count now {student_head_turned_count[name]}/3")
-            else:
-                student_head_turned_count[name] = 0
-                logger.info(f"Student {name} head position centered: head turned count reset to 0")
-            
-            # SLEEPING DETECTION - STRICTLY USING 3 CONSECUTIVE FRAMES RULE
-            # Only consider a student sleeping if eyes closed for 3 consecutive frames
-            is_sleeping = (student_eye_closed_count[name] >= 3)
-            
-            # DISTRACTION DETECTION - USING 3 CONSECUTIVE FRAMES RULE
-            is_distracted = (student_head_turned_count[name] >= 3)
-            
-            # Associate phone detection with this student if applicable
+            # First check for phone usage - PRIORITY CHECK
             is_using_phone = False
             if phone_detected and phone_detections:
                 for object_name, phone_info in phone_detections.items():
@@ -606,21 +578,54 @@ def analyze_image(image_data: str):
                         logger.info(f"Student {name} detected using phone - distance: {distance:.2f}px")
                         break
             
+            # Update head turned count for distraction detection
+            if head_position in ['left', 'right']:
+                student_head_turned_count[name] += 1
+                logger.info(f"Student {name} head turned {head_position}: frame count now {student_head_turned_count[name]}/3")
+            else:
+                student_head_turned_count[name] = 0
+                logger.info(f"Student {name} head position centered: head turned count reset to 0")
+            
+            # DISTRACTION DETECTION - 3 CONSECUTIVE FRAMES RULE
+            is_distracted = (student_head_turned_count[name] >= 3)
+            
+            # Only check for sleeping if not using phone
+            is_sleeping = False
+            if not is_using_phone:
+                # Process eye state detection only if needed
+                logger.info(f"Checking eye state for student {name}...")
+                eyes_closed = (detect_closed_eyes_with_mobilenet(image_np, [face]).get(0, "open") == "closed")
+                
+                # Update eye closed count for sleeping detection
+                if eyes_closed:
+                    student_eye_closed_count[name] += 1
+                    logger.info(f"Student {name} has closed eyes: frame count now {student_eye_closed_count[name]}/3")
+                else:
+                    student_eye_closed_count[name] = 0
+                    logger.info(f"Student {name} has open eyes: frame count reset to 0")
+                
+                # SLEEPING DETECTION - 3 CONSECUTIVE FRAMES RULE
+                is_sleeping = (student_eye_closed_count[name] >= 3)
+            else:
+                # Reset sleeping counter when using phone
+                student_eye_closed_count[name] = 0
+                logger.info(f"Student {name} is using phone - skipping eye closure detection")
+            
             # Update the student status
             student_status[name]['is_sleeping'] = is_sleeping
             student_status[name]['is_distracted'] = is_distracted
             student_status[name]['using_phone'] = is_using_phone
-            student_status[name]['gaze'] = 'focused' if not is_distracted else 'distracted'
+            student_status[name]['head_position'] = head_position
                 
             # Determine the event type for database recording
-            if is_sleeping:
-                event_type = "sleeping"
-                logger.info(f"Student {name} classified as SLEEPING - eyes closed for {student_eye_closed_count[name]} consecutive frames")
-            elif is_using_phone:
+            if is_using_phone:
                 event_type = "phone_usage"
                 logger.info(f"Student {name} classified as USING PHONE")
+            elif is_sleeping:
+                event_type = "sleeping"
+                logger.info(f"Student {name} classified as SLEEPING - eyes closed for {student_eye_closed_count[name]} consecutive frames")
             elif is_distracted:
-                event_type = "distracted" 
+                event_type = "distracted"
                 logger.info(f"Student {name} classified as DISTRACTED - head turned for {student_head_turned_count[name]} consecutive frames")
             else:
                 event_type = "focused"
@@ -635,10 +640,10 @@ def analyze_image(image_data: str):
             )
             
             # Log the final engagement classification
-            logger.info(f"Final engagement status for {name}: " + 
+            logger.info(f"Final status for {name}: " + 
+                      f"using_phone={is_using_phone}, " + 
                       f"sleeping={is_sleeping}, " + 
-                      f"distracted={is_distracted}, " + 
-                      f"using_phone={is_using_phone}")
+                      f"distracted={is_distracted}")
         
         # Create annotated image with detection results
         annotated_image = draw_faces_with_status(

@@ -171,7 +171,7 @@ function CaptureControl() {
                           (status.is_distracted ? '👀 Distracted' : 
                             (status.using_phone ? '📱 Phone' : '✅ Focused'))}
                       </div>
-                      <div className="student-gaze">Gaze: {status.gaze}</div>
+                      <div className="student-gaze">Head Position: {status.head_position}</div>
                     </li>
                   ))}
                 </ul>

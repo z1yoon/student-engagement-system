@@ -62,8 +62,8 @@ function AnalyzeReport() {
       { 
         label: "Distracted", 
         data: labels.map((name) => filteredData[name].distracted), 
-        backgroundColor: "rgba(239, 68, 68, 0.7)",
-        borderColor: "rgb(239, 68, 68)",
+        backgroundColor: "rgba(249, 115, 22, 0.7)",
+        borderColor: "rgb(249, 115, 22)",
         borderWidth: 1
       },
       { 
@@ -208,19 +208,19 @@ function AnalyzeReport() {
                       {details.distracted > 0 && (
                         <div className="status-detail">
                           <span className="status-icon distracted">👀</span>
-                          <span className="status-text">Distracted when looking left/right for 3+ consecutive frames</span>
+                          <span className="status-text">Distracted: Head turned left/right for 3+ consecutive frames.</span>
                         </div>
                       )}
                       {details.sleeping > 0 && (
                         <div className="status-detail">
                           <span className="status-icon sleeping">😴</span>
-                          <span className="status-text">Sleeping detected when eyes closed or head down for 3+ consecutive frames</span>
+                          <span className="status-text">Sleeping: Eyes closed for 3+ consecutive frames.</span>
                         </div>
                       )}
                       {details.phone_usage > 0 && (
                         <div className="status-detail">
                           <span className="status-icon phone">📱</span>
-                          <span className="status-text">Phone usage detected via Azure Computer Vision</span>
+                          <span className="status-text">Phone usage detected</span>
                         </div>
                       )}
                     </div>

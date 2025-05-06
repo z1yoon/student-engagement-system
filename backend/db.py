@@ -88,7 +88,7 @@ def create_tables():
                             student_name VARCHAR(100) NOT NULL,
                             event_type VARCHAR(50) NOT NULL,
                             phone_detected BIT NOT NULL,
-                            gaze VARCHAR(50) NOT NULL,
+                            head_position VARCHAR(50) NOT NULL,
                             sleeping BIT NOT NULL,
                             confidence FLOAT NOT NULL,
                             frame_reference VARCHAR(255) NULL
@@ -142,7 +142,7 @@ def create_tables():
                         cursor.execute("""
                             INSERT INTO StudentEngagement (
                                 timestamp, student_name, event_type, 
-                                phone_detected, gaze, sleeping, confidence
+                                phone_detected, head_position, sleeping, confidence
                             )
                             SELECT 
                                 timestamp, student_name, 
@@ -166,7 +166,7 @@ def create_tables():
                         cursor.execute("""
                             INSERT INTO StudentEngagement (
                                 timestamp, student_name, event_type, 
-                                phone_detected, gaze, sleeping, confidence, frame_reference
+                                phone_detected, head_position, sleeping, confidence, frame_reference
                             )
                             SELECT 
                                 timestamp, student_name, event_type,
@@ -292,13 +292,13 @@ def record_student_engagement(student_name, event_type, confidence=0.85, frame_d
             # Determine values for each field based on event type
             phone_detected = (event_type == "phone_usage")
             sleeping = (event_type == "sleeping")
-            gaze = "focused" if event_type == "focused" else "distracted"
+            head_position = "focused" if event_type == "focused" else "distracted"
             
             # Insert into consolidated table
             query = """
             INSERT INTO StudentEngagement (
                 student_name, event_type, phone_detected, 
-                gaze, sleeping, confidence, frame_reference
+                head_position, sleeping, confidence, frame_reference
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """
@@ -307,7 +307,7 @@ def record_student_engagement(student_name, event_type, confidence=0.85, frame_d
                 student_name, 
                 event_type, 
                 1 if phone_detected else 0,
-                gaze,
+                head_position,
                 1 if sleeping else 0,
                 confidence,
                 frame_reference
@@ -358,7 +358,7 @@ def get_engagement_records(start_date=None, end_date=None):
             cursor = conn.cursor()
             query = """
                 SELECT timestamp, student_name, phone_detected, 
-                       gaze, sleeping
+                       head_position, sleeping
                 FROM StudentEngagement
             """
             conditions = []
@@ -379,7 +379,7 @@ def get_engagement_records(start_date=None, end_date=None):
                     "timestamp": str(r[0]),
                     "student_name": r[1],
                     "phone_detected": bool(r[2]),
-                    "gaze": r[3],
+                    "head_position": r[3],
                     "sleeping": bool(r[4])
                 } for r in rows
             ]
@@ -483,15 +483,17 @@ def get_analyze_results(start_date=None, end_date=None):
     for record in engagement_records:
         name = record["student_name"]
         if name in summary:
-            if record["gaze"].lower() == "focused":
+            # Prioritize phone usage detection
+            if record["phone_detected"]:
+                summary[name]["phone_usage"] += 1
+            # If no phone detected, then check for sleeping
+            elif record["sleeping"]:
+                summary[name]["sleeping"] += 1
+            # If neither phone nor sleeping, then check head position for distracted/focused
+            elif record["head_position"].lower() == "focused":
                 summary[name]["focused"] += 1
             else:
                 summary[name]["distracted"] += 1
-                
-            if record["phone_detected"]:
-                summary[name]["phone_usage"] += 1
-            if record["sleeping"]:
-                summary[name]["sleeping"] += 1
     
     # Process attendance records
     for record in attendance_records:
