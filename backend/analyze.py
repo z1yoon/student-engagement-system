@@ -1,4 +1,5 @@
 import os
+import sys
 import io
 import base64
 import logging
@@ -6,36 +7,45 @@ import numpy as np
 import cv2
 from PIL import Image
 from functools import lru_cache
+import math
+import traceback
+import tempfile
+import mediapipe as mp
+import warnings
+from collections import defaultdict
+
+# Suppress NNPACK warnings globally - single approach to avoid redundancy
+warnings.filterwarnings("ignore", message="Could not initialize NNPACK")
+
+# Import PyTorch and other ML libraries after warning suppression
+import torch
+from transformers import AutoFeatureExtractor, AutoModelForImageClassification
 import insightface
 from insightface.app import FaceAnalysis
 from numpy.linalg import norm
+
+# Import YOLOv8 for phone detection
+try:
+    from ultralytics import YOLO
+except ImportError:
+    logging.error("Ultralytics not installed. Install with: pip install ultralytics")
+    raise
+
+# Local imports
 from db import mark_attendance, get_enrolled_students, record_student_engagement
-import requests
-from collections import defaultdict
-from config import VISION_API_ENDPOINT, VISION_API_KEY
-import math
-import traceback
-import torch
-from transformers import AutoFeatureExtractor, AutoModelForImageClassification
-import tempfile
-import mediapipe as mp
 
-import os
-os.environ["PYTORCH_CPP_LOG_LEVEL"] = "ERROR"  # Suppress C++ level warnings
-os.environ["KMP_INIT_AT_FORK"] = "FALSE"       # Avoid fork-related errors
-os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"  # Reduce CUDA-related warnings
-
-import warnings
-warnings.filterwarnings("ignore", module="torch")  # Ignore PyTorch warnings
 # Student tracking dictionaries to maintain state across frames
 student_eye_closed_count = defaultdict(int)  # Tracks consecutive frames with closed eyes
 student_head_turned_count = defaultdict(int)  # Tracks consecutive frames with head turned
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Define models directory path for Docker container
 MODEL_DIR = '/app/models'
+# Create models directory if it doesn't exist
+os.makedirs(MODEL_DIR, exist_ok=True)
 logger.info(f"Using models directory: {MODEL_DIR}")
 
 # Initialize MediaPipe Face Mesh for head pose estimation
@@ -48,10 +58,36 @@ face_mesh = mp_face_mesh.FaceMesh(
 )
 
 # Define key face landmark indices for head turn analysis
-# Left eye landmarks
-LEFT_EYE_LANDMARKS = [362, 385, 387, 263, 373, 380]
-# Right eye landmarks
-RIGHT_EYE_LANDMARKS = [33, 160, 158, 133, 153, 144]
+LEFT_EYE_LANDMARKS = [362, 385, 387, 263, 373, 380]  # Left eye landmarks
+RIGHT_EYE_LANDMARKS = [33, 160, 158, 133, 153, 144]  # Right eye landmarks
+
+@lru_cache(maxsize=1)
+def get_yolo_model():
+    """Initialize and return YOLOv8 model for object detection"""
+    try:
+        # Path to the YOLOv8 model in Docker container
+        yolo_model_path = os.path.join(MODEL_DIR, "yolov8n.pt")
+        
+        # Check if model exists, otherwise use the default one
+        if not os.path.exists(yolo_model_path):
+            logger.warning(f"YOLOv8 model not found at {yolo_model_path}, downloading...")
+            yolo_model = YOLO("yolov8n.pt")  # This will download the model if needed
+            
+            # Save the model to our models directory for future use
+            if os.path.exists("yolov8n.pt"):
+                logger.info(f"Moving downloaded model to {yolo_model_path}")
+                import shutil
+                shutil.move("yolov8n.pt", yolo_model_path)
+        else:
+            logger.info(f"Loading YOLOv8 model from: {yolo_model_path}")
+            yolo_model = YOLO(yolo_model_path)
+        
+        logger.info("✅ Successfully loaded YOLOv8 model")
+        return yolo_model
+    except Exception as e:
+        logger.error(f"Error initializing YOLOv8 model: {e}")
+        logger.error(traceback.format_exc())
+        raise
 
 @lru_cache(maxsize=1)
 def get_eye_state_model():
@@ -135,68 +171,56 @@ def compare_embeddings(embedding, enrolled_students, threshold=0.5):
     
     return best_name
 
-def detect_phone_with_azure_vision(image_bytes):
+def detect_phone_with_yolo(image_np):
     """
-    Detect phones in an image using Azure Computer Vision API
-    Only detects actual phones with exact matches
+    Detect phones in an image using YOLOv8
+    
+    Args:
+        image_np: RGB numpy image array
+    
+    Returns:
+        (bool, dict): Tuple of (phones detected, phone detections dictionary)
     """
-    endpoint = VISION_API_ENDPOINT
-    key = VISION_API_KEY
-    
-    if not endpoint or not key:
-        logger.error("Azure Vision API credentials not found")
-        return False, {}
-    
-    analyze_url = f"{endpoint}/vision/v3.2/analyze"
-    headers = {
-        'Ocp-Apim-Subscription-Key': key,
-        'Content-Type': 'application/octet-stream'
-    }
-    params = {
-        'visualFeatures': 'Objects',
-        'language': 'en'
-    }
-    
     try:
-        # Call Azure Vision API
-        response = requests.post(
-            analyze_url,
-            headers=headers,
-            params=params,
-            data=image_bytes
-        )
-        response.raise_for_status()
+        # Get YOLOv8 model
+        yolo_model = get_yolo_model()
         
-        result = response.json()
-        objects = result.get('objects', [])
+        # Run inference
+        results = yolo_model(image_np, conf=0.3)  # Lower confidence threshold to detect more phones
         
-        # Log all detected objects for debugging
-        logger.info(f"Azure Vision detected {len(objects)} objects")
-        for obj in objects:
-            logger.info(f"Detected object: {obj.get('object', '').lower()} with confidence {obj.get('confidence', 0)}")
-        
-        # ONLY detect exact phone objects
-        phone_terms = ['phone', 'cellphone', 'mobile', 'smartphone', 'iphone', 'android', 'ipod']
         phone_detections = {}
         
-        for obj in objects:
-            object_name = obj.get('object', '').lower()
-            if object_name in phone_terms:
-                confidence = obj.get('confidence', 0)
-                rectangle = obj.get('rectangle', {})
-                logger.info(f"Phone detected with confidence {confidence}")
+        # Process results
+        for i, result in enumerate(results):
+            boxes = result.boxes
+            for j, box in enumerate(boxes):
+                cls_id = int(box.cls.item())
+                conf = box.conf.item()
                 
-                phone_detections[object_name] = {
-                    'confidence': confidence,
-                    'position': rectangle
-                }
+                # Class 67 in COCO dataset is 'cell phone'
+                if cls_id == 67:  # cell phone
+                    # Get box coordinates
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    
+                    # Store detection info
+                    phone_detections[f"phone_{i}_{j}"] = {
+                        'confidence': conf,
+                        'position': {
+                            'x': int(x1),
+                            'y': int(y1),
+                            'w': int(x2 - x1),
+                            'h': int(y2 - y1)
+                        }
+                    }
+                    logger.info(f"Phone detected with confidence {conf:.2f}")
         
-        # Return True only if we found explicit phone objects
+        # Return True only if we found phones
         has_phones = len(phone_detections) > 0
         return has_phones, phone_detections
     
     except Exception as e:
-        logger.error(f"Error calling Azure Vision API: {str(e)}")
+        logger.error(f"Error in phone detection with YOLOv8: {str(e)}")
+        logger.error(traceback.format_exc())
         return False, {}
 
 def estimate_head_pose(face_landmarks, image_width, image_height):
@@ -264,7 +288,7 @@ def detect_closed_eyes_with_mobilenet(image_np, faces):
         id2label = model.config.id2label if hasattr(model.config, 'id2label') else {0: "closed", 1: "open"}
         
         # Set high confidence threshold for closed eyes to reduce false positives
-        CLOSED_EYE_CONFIDENCE_THRESHOLD = 0.95  # 90% confidence required
+        CLOSED_EYE_CONFIDENCE_THRESHOLD = 0.95  # 95% confidence required
         
         # Process each face
         for face_idx, face in enumerate(faces):
@@ -315,7 +339,7 @@ def detect_closed_eyes_with_mobilenet(image_np, faces):
                 logger.info(f"Eye state detection for face {face_idx}: " +
                            f"Model prediction '{predicted_label}' with " +
                            f"closed confidence {closed_confidence:.4f}, open confidence {open_confidence:.4f} " +
-                           f"(using 90% threshold for closed)")
+                           f"(using 95% threshold for closed)")
                 
                 results[face_idx] = "closed" if is_closed else "open"
                 
@@ -391,11 +415,11 @@ def draw_faces_with_status(image_bytes, faces, recognized_students, student_stat
                 cv2.rectangle(img, (x, y), (x + w, y + h), (0, 0, 255), 2)
                 
                 # Add label with confidence score
-                label = f"{object_name}: {confidence:.2f}"
+                label = f"Phone: {confidence:.2f}"
                 cv2.putText(img, label, (x, y - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 
-                logger.info(f"Drawing bounding box for {object_name} at position x={x}, y={y}, w={w}, h={h}")
+                logger.info(f"Drawing bounding box for phone at position x={x}, y={y}, w={w}, h={h}")
         
         for idx, face in enumerate(faces):
             bbox = face.bbox.astype(np.int32)
@@ -416,7 +440,6 @@ def draw_faces_with_status(image_bytes, faces, recognized_students, student_stat
                 status_text = "SLEEPING"
             elif status.get('is_distracted', False):
                 color = (0, 165, 255)  # Orange for distracted
-                status_text = "DISTRACTED"
             elif status.get('using_phone', False):
                 color = (255, 0, 0)  # Blue for phone usage
                 status_text = "PHONE"
@@ -495,17 +518,17 @@ def analyze_image(image_data: str):
         recognized_students = {}
         student_status = {}
         
-        # Detect phone usage using Azure Vision API - but only trust explicit phone detections
-        logger.info("Detecting phones in the image...")
-        phone_detected, phone_detections = detect_phone_with_azure_vision(image_bytes)
+        # Detect phone usage using YOLOv8 instead of Azure Vision API
+        logger.info("Detecting phones with YOLOv8...")
+        phone_detected, phone_detections = detect_phone_with_yolo(image_np)
         logger.info(f"Phone detection result: {phone_detected}")
         if phone_detected:
-            logger.info(f"Phones detected: {list(phone_detections.keys())}")
+            logger.info(f"Phones detected: {len(phone_detections)}")
         
-        # Process detections for eye closure and head position using the MobileNetV2 model
+        # Process detections for eye closure and head position
         logger.info("Detecting eye closure with MobileNetV2 model...")
         eye_states = detect_closed_eyes_with_mobilenet(image_np, faces)
-        logger.info("Detecting head position with MediaPipe thresholds adjusted for significant turns...")
+        logger.info("Detecting head position with MediaPipe...")
         head_positions = detect_head_position_with_mediapipe(image_np, faces)
         
         # Process each detected face
