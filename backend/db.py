@@ -63,8 +63,12 @@ def create_tables():
                             id INT IDENTITY(1,1) PRIMARY KEY, 
                             student_name VARCHAR(100) NOT NULL UNIQUE, 
                             face_id VARCHAR(255) NULL, 
-                            face_embedding TEXT NULL, 
-                            image_url VARCHAR(255) NULL
+                            face_embedding_center TEXT NULL, 
+                            face_embedding_left TEXT NULL,
+                            face_embedding_right TEXT NULL,
+                            image_url_center VARCHAR(255) NULL,
+                            image_url_left VARCHAR(255) NULL,
+                            image_url_right VARCHAR(255) NULL
                         ) 
                     END
                 """,
@@ -205,20 +209,30 @@ def get_enrolled_students():
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT student_name, face_id, face_embedding, image_url FROM Students WHERE face_embedding IS NOT NULL")
+            cursor.execute("SELECT student_name, face_id, face_embedding_center, face_embedding_left, face_embedding_right, image_url_center, image_url_left, image_url_right FROM Students WHERE face_embedding_center IS NOT NULL OR face_embedding_left IS NOT NULL OR face_embedding_right IS NOT NULL")
             rows = cursor.fetchall()
             result = []
             for row in rows:
                 name = row[0]
                 face_id = row[1]
-                face_embedding_json = row[2]
-                image_url = row[3]
-                face_embedding = json.loads(face_embedding_json) if face_embedding_json else None
+                face_embedding_center_json = row[2]
+                face_embedding_left_json = row[3]
+                face_embedding_right_json = row[4]
+                image_url_center = row[5]
+                image_url_left = row[6]
+                image_url_right = row[7]
+                face_embedding_center = json.loads(face_embedding_center_json) if face_embedding_center_json else None
+                face_embedding_left = json.loads(face_embedding_left_json) if face_embedding_left_json else None
+                face_embedding_right = json.loads(face_embedding_right_json) if face_embedding_right_json else None
                 result.append({
                     "name": name,
                     "face_id": face_id,
-                    "face_embedding": face_embedding,
-                    "image_url": image_url
+                    "face_embedding_center": face_embedding_center,
+                    "face_embedding_left": face_embedding_left,
+                    "face_embedding_right": face_embedding_right,
+                    "image_url_center": image_url_center,
+                    "image_url_left": image_url_left,
+                    "image_url_right": image_url_right
                 })
             return result
     except pyodbc.Error as e:
@@ -237,15 +251,17 @@ def student_exists(name):
         logger.error(f"❌ Error checking if student exists: {e}")
         return False
 
-def add_student(name, face_id=None, face_embedding=None, image_url=None):
+def add_student(name, face_id=None, face_embedding_center=None, face_embedding_left=None, face_embedding_right=None, image_url_center=None, image_url_left=None, image_url_right=None):
     """Add a new student to the database"""
     try:
         with db_connection() as conn:
             cursor = conn.cursor()
-            face_emb_json = json.dumps(face_embedding) if face_embedding else None
+            face_emb_center_json = json.dumps(face_embedding_center) if face_embedding_center else None
+            face_emb_left_json = json.dumps(face_embedding_left) if face_embedding_left else None
+            face_emb_right_json = json.dumps(face_embedding_right) if face_embedding_right else None
             cursor.execute(
-                "INSERT INTO Students (student_name, face_id, face_embedding, image_url) VALUES (?, ?, ?, ?)",
-                (name, face_id, face_emb_json, image_url)
+                "INSERT INTO Students (student_name, face_id, face_embedding_center, face_embedding_left, face_embedding_right, image_url_center, image_url_left, image_url_right) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, face_id, face_emb_center_json, face_emb_left_json, face_emb_right_json, image_url_center, image_url_left, image_url_right)
             )
             conn.commit()
             logger.info(f"✅ Student {name} added.")
@@ -503,7 +519,8 @@ def get_analyze_results(start_date=None, end_date=None):
     
     # Calculate percentages
     for name, stats in summary.items():
-        total_records = stats["focused"] + stats["distracted"]
+        # Include ALL events in the total count for accurate percentage calculation
+        total_records = stats["focused"] + stats["distracted"] + stats["phone_usage"] + stats["sleeping"]
         
         if total_records > 0:
             stats["focused_percentage"] = round((stats["focused"] / total_records) * 100, 1)
@@ -538,18 +555,19 @@ def check_similar_face_exists(face_embedding, similarity_threshold=0.80):
         
         # Check similarity against each enrolled student
         for student in enrolled_students:
-            if student["face_embedding"]:
-                existing_embedding = np.array(student["face_embedding"])
-                
-                # Calculate cosine similarity
-                dot_product = np.dot(new_embedding, existing_embedding)
-                norm_new = np.linalg.norm(new_embedding)
-                norm_existing = np.linalg.norm(existing_embedding)
-                similarity = dot_product / (norm_new * norm_existing)
-                
-                # If similarity is above threshold, consider it a match
-                if similarity >= similarity_threshold:
-                    similar_students.append((student["name"], float(similarity)))
+            for embedding_key in ["face_embedding_center", "face_embedding_left", "face_embedding_right"]:
+                if student[embedding_key]:
+                    existing_embedding = np.array(student[embedding_key])
+                    
+                    # Calculate cosine similarity
+                    dot_product = np.dot(new_embedding, existing_embedding)
+                    norm_new = np.linalg.norm(new_embedding)
+                    norm_existing = np.linalg.norm(existing_embedding)
+                    similarity = dot_product / (norm_new * norm_existing)
+                    
+                    # If similarity is above threshold, consider it a match
+                    if similarity >= similarity_threshold:
+                        similar_students.append((student["name"], float(similarity)))
         
         # Return whether any face is similar enough to be considered a duplicate
         return len(similar_students) > 0, similar_students

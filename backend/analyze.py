@@ -35,8 +35,8 @@ except ImportError:
 from db import mark_attendance, get_enrolled_students, record_student_engagement
 
 # Student tracking dictionaries to maintain state across frames
-student_eye_closed_count = defaultdict(int)  # Tracks consecutive frames with closed eyes
-student_head_turned_count = defaultdict(int)  # Reintroduce tracking consecutive frames with head turned
+student_eye_closed_count = defaultdict(int)  # Tracks accumulating frames with closed eyes, not necessarily consecutive
+student_head_turned_count = defaultdict(int)  # Track accumulating frames with head turned (not necessarily consecutive)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -151,23 +151,74 @@ def get_face_app():
         logger.error(traceback.format_exc())
         raise
 
-def compare_embeddings(embedding, enrolled_students, threshold=0.5):
-    """Compare face embedding with enrolled students using cosine similarity"""
+def compare_embeddings(embedding, enrolled_students, head_position="center", threshold=0.5):
+    """
+    Compare face embedding with enrolled students using cosine similarity
+    
+    This enhanced version uses head position information to better match face embeddings
+    by prioritizing embeddings of the same orientation (center, left, right)
+    
+    Args:
+        embedding: Face embedding to compare
+        enrolled_students: List of enrolled student data
+        head_position: Detected head position ('center', 'left', 'right')
+        threshold: Minimum similarity threshold for recognition
+        
+    Returns:
+        Name of best matching student or "Unknown"
+    """
     best_name = "Unknown"
     best_similarity = -1
     
+    # Map the head position to the corresponding embedding key
+    position_to_embedding = {
+        "center": "face_embedding_center",
+        "left": "face_embedding_left", 
+        "right": "face_embedding_right"
+    }
+    
+    # Define fallback order for each head position
+    fallback_order = {
+        "center": ["face_embedding_center", "face_embedding", "face_embedding_left", "face_embedding_right"],
+        "left": ["face_embedding_left", "face_embedding", "face_embedding_center", "face_embedding_right"],
+        "right": ["face_embedding_right", "face_embedding", "face_embedding_center", "face_embedding_left"]
+    }
+    
+    # Get the preferred embedding keys based on head position
+    preferred_key = position_to_embedding.get(head_position, "face_embedding")
+    embedding_keys = fallback_order.get(head_position, ["face_embedding", "face_embedding_center", "face_embedding_left", "face_embedding_right"])
+    
+    logger.info(f"Using '{head_position}' face position for recognition (preferred embedding: {preferred_key})")
+    
     for student in enrolled_students:
         student_name = student.get("name", "Unknown")
-        emb = student.get("face_embedding")
-        if emb is not None:
-            similarity = cosine_similarity(embedding, np.array(emb))
-            logger.debug(f"Similarity to {student_name}: {similarity:.4f}")
-            if similarity > best_similarity and similarity > threshold:
-                best_similarity = similarity
-                best_name = student["name"]
+        
+        # Try matching with embeddings in order of preference based on head position
+        student_best_similarity = -1
+        
+        # Check each embedding type in preference order
+        for embedding_key in embedding_keys:
+            student_embedding = student.get(embedding_key)
+            
+            if student_embedding is not None:
+                # Calculate similarity
+                similarity = cosine_similarity(embedding, np.array(student_embedding))
+                
+                # Keep track of best similarity for this student
+                if similarity > student_best_similarity:
+                    student_best_similarity = similarity
+                
+                # Log similarity for preferred embedding position
+                if embedding_key == preferred_key:
+                    logger.debug(f"Similarity to {student_name} ({head_position}): {similarity:.4f}")
+        
+        # Update best match if this student has better similarity
+        if student_best_similarity > best_similarity and student_best_similarity > threshold:
+            best_similarity = student_best_similarity
+            best_name = student_name
     
     if best_name != "Unknown":
-        logger.info(f"Recognized as {best_name} with similarity {best_similarity:.4f}")
+        logger.info(f"Recognized as {best_name} with similarity {best_similarity:.4f} (head position: {head_position})")
     
     return best_name
 
@@ -533,9 +584,12 @@ def analyze_image(image_data: str):
         
         # Process each detected face
         for idx, face in enumerate(faces):
-            # USING INSIGHTFACE FOR RECOGNITION
+            # USING INSIGHTFACE FOR RECOGNITION WITH HEAD POSITION
             embedding = face.embedding
-            name = compare_embeddings(embedding, enrolled_students)
+            head_position = head_positions.get(idx, "center")
+            
+            # Pass head position to compare_embeddings for better matching
+            name = compare_embeddings(embedding, enrolled_students, head_position)
             recognized_students[idx] = name
             
             # Skip unknown faces for engagement tracking
@@ -555,78 +609,100 @@ def analyze_image(image_data: str):
                 'is_sleeping': False,
                 'is_distracted': False,
                 'using_phone': False,
-                'head_position': 'center'
+                'head_position': 'center',
+                'current_eyes': 'open'   # Track current eye state
             }
             
-            # Get head position for this face
-            head_position = head_positions.get(idx, "center")
-            
-            # First check for phone usage - PRIORITY CHECK
+            # Check for phone usage - associate phones with students based on proximity
             is_using_phone = False
             if phone_detected and phone_detections:
                 for object_name, phone_info in phone_detections.items():
                     rect = phone_info['position']
-                    phone_center_x = (rect['x'] + rect['w']/2)
-                    phone_center_y = (rect['y'] + rect['h']/2)
+                    phone_center_x = rect['x'] + rect['w']/2
+                    phone_center_y = rect['y'] + rect['h']/2
                     
                     # Strict criteria for phone-face association
                     distance = math.sqrt((face_center_x - phone_center_x)**2 + 
-                                         (face_center_y - phone_center_y)**2)
+                                        (face_center_y - phone_center_y)**2)
                     
-                    if distance < 200:
+                    if distance < 200:  # Phone is close to this student's face
                         is_using_phone = True
                         logger.info(f"Student {name} detected using phone - distance: {distance:.2f}px")
                         break
             
-            # Update head turned count for distraction detection
-            if head_position in ['left', 'right']:
+            # When phone is detected for this student, set as phone user
+            if is_using_phone:
+                # Set phone usage status
+                student_status[name]['using_phone'] = True
+                # Reset other counters
+                student_eye_closed_count[name] = 0
+                student_head_turned_count[name] = 0
+                # Record phone_usage event type
+                event_type = "phone_usage"
+                logger.info(f"Student {name} classified as USING PHONE")
+                
+                # Update the student status in the database
+                record_student_engagement(
+                    student_name=name,
+                    event_type=event_type,
+                    confidence=0.95,  # Higher confidence for phone detection
+                    frame_data=image_data
+                )
+                
+                # Skip other engagement checks - phone usage takes priority
+                logger.info(f"Final status for {name}: using_phone=True, skipping other engagement checks")
+                continue
+            
+            # Only proceed with other checks if no phone is detected for this student
+            
+            # Check if head is currently turned
+            is_head_currently_turned = (head_position in ['left', 'right'])
+            
+            # Track head turns - accumulate count when head is turned
+            if is_head_currently_turned:
                 student_head_turned_count[name] += 1
                 logger.info(f"Student {name} head turned {head_position}: frame count now {student_head_turned_count[name]}/3")
-            else:
-                student_head_turned_count[name] = 0
-                logger.info(f"Student {name} head position centered: head turned count reset to 0")
             
-            # DISTRACTION DETECTION - 3 CONSECUTIVE FRAMES RULE
+            # DISTRACTION DETECTION - 3+ FRAMES WITH HEAD TURNED
             is_distracted = (student_head_turned_count[name] >= 3)
             
-            # Only check for sleeping if not using phone
-            is_sleeping = False
-            if not is_using_phone:
-                # Process eye state detection only if needed
-                logger.info(f"Checking eye state for student {name}...")
-                eyes_closed = (detect_closed_eyes_with_mobilenet(image_np, [face]).get(0, "open") == "closed")
-                
-                # Update eye closed count for sleeping detection
-                if eyes_closed:
-                    student_eye_closed_count[name] += 1
-                    logger.info(f"Student {name} has closed eyes: frame count now {student_eye_closed_count[name]}/3")
-                else:
-                    student_eye_closed_count[name] = 0
-                    logger.info(f"Student {name} has open eyes: frame count reset to 0")
-                
-                # SLEEPING DETECTION - 3 CONSECUTIVE FRAMES RULE
-                is_sleeping = (student_eye_closed_count[name] >= 3)
-            else:
-                # Reset sleeping counter when using phone
+            # Reset counter after detecting distraction
+            if is_distracted:
+                student_head_turned_count[name] = 0
+                logger.info(f"Student {name} detected as DISTRACTED - resetting head turn counter")
+            
+            # Store current head position for status display
+            student_status[name]['head_position'] = head_position
+            
+            # Process eye state detection
+            logger.info(f"Checking eye state for student {name}...")
+            eyes_closed = (detect_closed_eyes_with_mobilenet(image_np, [face]).get(0, "open") == "closed")
+            student_status[name]['current_eyes'] = 'closed' if eyes_closed else 'open'
+            
+            # Update eye closed count for sleeping detection - now accumulating like head turns
+            if eyes_closed:
+                student_eye_closed_count[name] += 1
+                logger.info(f"Student {name} has closed eyes: frame count now {student_eye_closed_count[name]}/3")
+            
+            # SLEEPING DETECTION - 3+ ACCUMULATED FRAMES WITH CLOSED EYES (not necessarily consecutive)
+            is_sleeping = (student_eye_closed_count[name] >= 3)
+            
+            # Reset counter after detecting sleeping
+            if is_sleeping:
                 student_eye_closed_count[name] = 0
-                logger.info(f"Student {name} is using phone - skipping eye closure detection")
+                logger.info(f"Student {name} detected as SLEEPING - resetting eye closed counter")
             
             # Update the student status
             student_status[name]['is_sleeping'] = is_sleeping
             student_status[name]['is_distracted'] = is_distracted
-            student_status[name]['using_phone'] = is_using_phone
-            student_status[name]['head_position'] = head_position
                 
             # Determine the event type for database recording
-            if is_using_phone:
-                event_type = "phone_usage"
-                logger.info(f"Student {name} classified as USING PHONE")
-            elif is_sleeping:
+            if is_sleeping:
                 event_type = "sleeping"
-                logger.info(f"Student {name} classified as SLEEPING - eyes closed for {student_eye_closed_count[name]} consecutive frames")
+                logger.info(f"Student {name} classified as SLEEPING - eyes closed for {student_eye_closed_count[name]} accumulated frames")
             elif is_distracted:
                 event_type = "distracted"
-                logger.info(f"Student {name} classified as DISTRACTED - head turned for {student_head_turned_count[name]} consecutive frames")
+                logger.info(f"Student {name} classified as DISTRACTED - head turned for {student_head_turned_count[name]} accumulated frames")
             else:
                 event_type = "focused"
                 logger.info(f"Student {name} classified as FOCUSED")
@@ -641,9 +717,11 @@ def analyze_image(image_data: str):
             
             # Log the final engagement classification
             logger.info(f"Final status for {name}: " + 
-                      f"using_phone={is_using_phone}, " + 
-                      f"sleeping={is_sleeping}, " + 
-                      f"distracted={is_distracted}")
+                      f"using_phone={is_using_phone}, " +
+                      f"sleeping={is_sleeping}, " +
+                      f"distracted={is_distracted}, " +
+                      f"head_turn_count={student_head_turned_count[name]}, " +
+                      f"eye_closed_count={student_eye_closed_count[name]}")
         
         # Create annotated image with detection results
         annotated_image = draw_faces_with_status(

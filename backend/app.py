@@ -126,76 +126,154 @@ def startup_db_client():
 def enroll_student(payload: dict = Body(...)):
     """API endpoint for enrolling a new student with face recognition"""
     student_name = payload.get("student_name")
-    image_data = payload.get("image_data")
+    image_center = payload.get("image_center")
+    image_left = payload.get("image_left")
+    image_right = payload.get("image_right")
     
     # Input validation
-    if not student_name or not image_data:
-        raise HTTPException(status_code=400, detail="Missing student name or image data.")
+    if not student_name:
+        raise HTTPException(status_code=400, detail="Missing student name.")
+    if not image_center:
+        raise HTTPException(status_code=400, detail="Missing center image.")
+    if not image_left:
+        raise HTTPException(status_code=400, detail="Missing left image.")
+    if not image_right:
+        raise HTTPException(status_code=400, detail="Missing right image.")
+    
     if student_exists(student_name):
         raise HTTPException(status_code=409, detail=f"Student '{student_name}' is already registered.")
     
+    # Process all images to compute face embeddings
     try:
-        # Decode base64 image
-        image_bytes = base64.b64decode(
-            image_data.split(",")[1] if "," in image_data else image_data
+        # Decode base64 images
+        image_bytes_center = base64.b64decode(
+            image_center.split(",")[1] if "," in image_center else image_center
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid base64 data: {e}")
-    
-    try:
-        # Process image and extract face embedding
-        processed_image, image_np, image_np_bgr = prepare_image_for_processing(image_bytes)
-        face_embedding = None
+        image_bytes_left = base64.b64decode(
+            image_left.split(",")[1] if "," in image_left else image_left
+        )
+        image_bytes_right = base64.b64decode(
+            image_right.split(",")[1] if "," in image_right else image_right
+        )
         
-        from analyze import get_face_app
+        # Process images
+        from analyze import prepare_image_for_processing, get_face_app
+        
+        # Process center image
+        processed_center, image_np_center, image_np_bgr_center = prepare_image_for_processing(image_bytes_center)
+        
+        # Process left image
+        processed_left, image_np_left, image_np_bgr_left = prepare_image_for_processing(image_bytes_left)
+        
+        # Process right image
+        processed_right, image_np_right, image_np_bgr_right = prepare_image_for_processing(image_bytes_right)
+        
+        # Initialize face app once
         face_app = get_face_app()
-        faces = face_app.get(image_np_bgr)
         
-        if faces and len(faces) > 0:
-            embedding = getattr(faces[0], 'embedding', None)
+        # Extract embeddings from each position
+        face_embedding_center = None
+        face_embedding_left = None
+        face_embedding_right = None
+        
+        # Get center face embedding
+        faces_center = face_app.get(image_np_bgr_center)
+        if faces_center and len(faces_center) > 0:
+            embedding = getattr(faces_center[0], 'embedding', None)
             if embedding is not None:
-                face_embedding = embedding.tolist()
-                logger.info(f"✅ Face embedding computed for {student_name}")
-                # Print the face embedding (first 10 values for brevity)
-                embedding_sample = face_embedding[:10]
-                logger.info(f"Face embedding sample (first 10 values): {embedding_sample}")
-                
-                # Check for similar existing faces (de-duplication)
-                has_similar_face, similar_students = check_similar_face_exists(face_embedding, similarity_threshold=0.80)
-                
-                if has_similar_face:
-                    # Format the similar students for the error message
-                    similar_faces_info = []
-                    for name, similarity in similar_students:
-                        similarity_percent = round(similarity * 100, 2)
-                        similar_faces_info.append(f"{name} ({similarity_percent}% similar)")
-                    
-                    similar_faces_str = ", ".join(similar_faces_info)
-                    raise HTTPException(
-                        status_code=409, 
-                        detail=f"This face appears to be already enrolled as: {similar_faces_str}. Cannot enroll the same person with different names."
-                    )
-            else:
-                logger.warning("⚠️ Face detected but no embedding computed")
+                face_embedding_center = embedding.tolist()
+                logger.info(f"✅ Center face embedding computed for {student_name}")
         else:
-            logger.warning("⚠️ No face detected during enrollment")
+            logger.warning(f"⚠️ No face detected in center image for {student_name}")
+            raise HTTPException(status_code=400, detail="No face detected in center image. Please ensure face is clearly visible.")
+        
+        # Get left face embedding
+        faces_left = face_app.get(image_np_bgr_left)
+        if faces_left and len(faces_left) > 0:
+            embedding = getattr(faces_left[0], 'embedding', None)
+            if embedding is not None:
+                face_embedding_left = embedding.tolist()
+                logger.info(f"✅ Left face embedding computed for {student_name}")
+        else:
+            logger.warning(f"⚠️ No face detected in left image for {student_name}")
+            # Not raising exception for left image, it's optional
+        
+        # Get right face embedding
+        faces_right = face_app.get(image_np_bgr_right)
+        if faces_right and len(faces_right) > 0:
+            embedding = getattr(faces_right[0], 'embedding', None)
+            if embedding is not None:
+                face_embedding_right = embedding.tolist()
+                logger.info(f"✅ Right face embedding computed for {student_name}")
+        else:
+            logger.warning(f"⚠️ No face detected in right image for {student_name}")
+            # Not raising exception for right image, it's optional
+        
+        # Check if we have at least one valid embedding
+        if not face_embedding_center and not face_embedding_left and not face_embedding_right:
+            raise HTTPException(status_code=400, detail="Could not detect face in any of the provided images.")
+        
+        # We'll use the center embedding for duplicate checking since it's the most reliable
+        if face_embedding_center:
+            # Check for similar existing faces (de-duplication)
+            has_similar_face, similar_students = check_similar_face_exists(face_embedding_center, similarity_threshold=0.80)
+            
+            if has_similar_face:
+                # Format the similar students for the error message
+                similar_faces_info = []
+                for name, similarity in similar_students:
+                    similarity_percent = round(similarity * 100, 2)
+                    similar_faces_info.append(f"{name} ({similarity_percent}% similar)")
+                
+                similar_faces_str = ", ".join(similar_faces_info)
+                raise HTTPException(
+                    status_code=409, 
+                    detail=f"This face appears to be already enrolled as: {similar_faces_str}. Cannot enroll the same person with different names."
+                )
+        
     except HTTPException:
-        # Re-raise HTTPExceptions (like our duplicate face error)
+        # Re-raise HTTPExceptions
         raise
     except Exception as e:
         logger.error(f"Error during image processing: {e}")
-        face_embedding = None
+        raise HTTPException(status_code=500, detail=f"Error processing images: {str(e)}")
     
-    # Save student image and add to database
+    # Save student images and add to database
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_name = f"{student_name}_{timestamp}.jpg"
-    blob_url = upload_to_blob(image_bytes, file_name)
-    add_student(student_name, None, face_embedding, blob_url)
+    
+    # Upload images to blob storage
+    center_file_name = f"{student_name}_center_{timestamp}.jpg"
+    left_file_name = f"{student_name}_left_{timestamp}.jpg"
+    right_file_name = f"{student_name}_right_{timestamp}.jpg"
+    
+    blob_url_center = upload_to_blob(image_bytes_center, center_file_name)
+    blob_url_left = upload_to_blob(image_bytes_left, left_file_name)
+    blob_url_right = upload_to_blob(image_bytes_right, right_file_name)
+    
+    # Add student with all embeddings and image URLs
+    add_student(
+        student_name, 
+        None, 
+        face_embedding_center, 
+        face_embedding_left, 
+        face_embedding_right,
+        blob_url_center,
+        blob_url_left,
+        blob_url_right
+    )
     
     return {
-        "message": "Student enrolled successfully!",
-        "blob_url": blob_url,
-        "face_embedding_sample": face_embedding[:10] if face_embedding else None
+        "message": "Student enrolled successfully with all face positions!",
+        "blob_urls": {
+            "center": blob_url_center,
+            "left": blob_url_left,
+            "right": blob_url_right
+        },
+        "embeddings_computed": {
+            "center": face_embedding_center is not None,
+            "left": face_embedding_left is not None,
+            "right": face_embedding_right is not None
+        }
     }
 
 @app.post("/api/start-capture")

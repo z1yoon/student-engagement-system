@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Graduation Cap -->
+  <circle cx="128" cy="128" r="120" fill="#2563eb" />
+  <path d="M128 60l-80 40 80 40 80-40z" fill="#ffffff"/>
+  <path d="M188 100v60c0 11-27 30-60 30s-60-19-60-30v-60" stroke="#ffffff" stroke-width="10" fill="none"/>
+  <rect x="178" y="100" width="20" height="60" fill="#ffffff"/>
+  <circle cx="188" cy="170" r="15" fill="#ffffff"/>
+</svg>

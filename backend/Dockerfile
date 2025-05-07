@@ -1,3 +1,4 @@
+# Stage 1: Build wheels
 FROM --platform=linux/amd64 python:3.11-slim AS builder
 
 WORKDIR /build
@@ -15,7 +16,27 @@ COPY requirements.txt .
 # For x86 architecture, we can optimize with CPU-only PyTorch
 RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
-# Runtime stage
+# Stage 2: Download and cache YOLOv8 model - NOW WITH OPENCV DEPENDENCIES
+FROM --platform=linux/amd64 python:3.11-slim AS model-downloader
+
+WORKDIR /models
+
+# Install necessary dependencies for OpenCV
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install only ultralytics to download the model
+RUN pip install --no-cache-dir ultralytics
+
+# Download the YOLOv8 model - this layer will be cached if the command doesn't change
+RUN python -c "from ultralytics import YOLO; model = YOLO('yolov8n.pt', task='detect')" && \
+    mkdir -p /models/yolo && \
+    mv yolov8n.pt /models/yolo/
+
+# Stage 3: Runtime application
 FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
@@ -51,18 +72,19 @@ ENV ODBCINI=/etc/odbc.ini \
     PYTHONWARNINGS="ignore::DeprecationWarning:OpenSSL,ignore:Could not initialize NNPACK" \
     OPENSSL_CONF=/dev/null
 
+# Create model directory structure
+RUN mkdir -p /app/models/yolo /app/models/insightface_data /app/models/eye_state_model
+
 # Copy wheels from builder stage and install
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* && \
     rm -rf /wheels
 
-# Copy application files
-COPY . .
+# Copy pre-downloaded YOLOv8 model
+COPY --from=model-downloader /models/yolo/yolov8n.pt /app/models/yolo/yolov8n.pt
 
-# Use smaller YOLOv8 model and pre-download
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt', task='detect')" && \
-    mkdir -p /app/models/yolo && \
-    mv yolov8n.pt /app/models/yolo/
+# Copy application files - do this last to leverage caching
+COPY . .
 
 # Run the FastAPI application with uvicorn server
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

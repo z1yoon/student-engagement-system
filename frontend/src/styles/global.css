@@ -166,6 +166,57 @@ input:focus, select:focus, textarea:focus {
   text-align: center;
 }
 
+/* Enrollment Success Banner */
+.enrollment-success-banner {
+  position: relative;
+  background-color: rgba(34, 197, 94, 0.1);
+  border: 2px solid var(--success);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  animation: fadeInSlideDown 0.5s ease-in-out;
+  box-shadow: var(--shadow-md);
+}
+
+@keyframes fadeInSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.enrollment-success-banner .success-icon {
+  font-size: 2.5rem;
+  color: var(--success);
+}
+
+.enrollment-success-banner .success-message {
+  flex: 1;
+}
+
+.enrollment-success-banner h3 {
+  margin-bottom: 0.5rem;
+  color: var(--success);
+  font-weight: 600;
+}
+
+.enrollment-success-banner p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.enrollment-success-banner strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 /* Navbar styles */
 .navbar {
   background-color: var(--primary);
@@ -341,6 +392,70 @@ input:focus, select:focus, textarea:focus {
   background-color: rgba(239, 68, 68, 0.1);
   border: 1px solid var(--danger);
   color: var(--danger);
+}
+
+/* Multi-position enrollment styles */
+.position-selector {
+  margin-bottom: 1.5rem;
+  border: 1px solid var(--text-light);
+  border-radius: var(--radius-md);
+  padding: 1rem;
+  background-color: rgba(0, 0, 0, 0.02);
+}
+
+.position-buttons {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.position-btn {
+  flex: 1;
+  padding: 0.75rem;
+  background-color: var(--secondary);
+  transition: all 0.2s ease;
+}
+
+.position-btn.active {
+  background-color: var(--primary);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
+}
+
+.position-hint {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 0;
+}
+
+.preview-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.preview-wrapper {
+  position: relative;
+  width: 180px;
+  height: 135px;
+}
+
+.position-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  color: white;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8rem;
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+.message.info {
+  background-color: rgba(59, 130, 246, 0.1);
+  border: 1px solid var(--info);
+  color: var(--info);
 }
 
 /* Capture Control Styles */
@@ -623,4 +738,4 @@ input:focus, select:focus, textarea:focus {
 .modal-close {
   margin-top: 1.5rem;
   padding: 0.5rem 1.5rem;
-} 
+}
